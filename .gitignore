@@ -1,0 +1,28 @@
+# Local segmentation config (contains secrets)
+perinuclear_analysis/analysis/config.yaml
+.perinuclear_analysis/
+.config/perinuclear_analysis/config.yaml
+data/
+manual_coloc.xlsx
+
+
+python files
+*pycache*
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
+*.pyzw
+*.pywzw
+*.pyzwzw
+
+
+CLAUDE.MD
+cellpose_api.md
+
+data/
+*.tif
+*.ome.tif
+*.nd2
