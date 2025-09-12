@@ -26,3 +26,8 @@ data/
 *.tif
 *.ome.tif
 *.nd2
+
+perinuclear_analysis.egg-info/
+
+*.err
+*.out

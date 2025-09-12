@@ -1,11 +1,11 @@
 """
 Perinuclear Analysis Module
 
-A phased implementation for analyzing subcellular localization in microscopy images.
+A phased implementation for analyzing microscopy images.
 """
 
 __version__ = "0.1.0"
-__author__ = "Your Name"
+__author__ = "Gabriel Duarte"
 
 import warnings
 from typing import Dict, Any

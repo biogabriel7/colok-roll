@@ -10,6 +10,9 @@ install_requires = [
     "scikit-image>=0.19.0",
     "matplotlib>=3.5.0",
     "Pillow>=9.0.0",
+    # Needed at runtime across loaders and analyses
+    "tifffile>=2023.7.10",
+    "imageio>=2.31.0",
 ]
 
 # Phase-specific dependencies
@@ -45,6 +48,19 @@ extras_require = {
         "openpyxl>=3.0.0",
         "xlsxwriter>=3.0.0",
     ],
+    # Optional: GPU acceleration via CuPy (choose one matching your CUDA toolchain)
+    "cuda11": [
+        "cupy-cuda11x>=11.0.0",
+    ],
+    "cuda12": [
+        "cupy-cuda12x>=12.0.0",
+    ],
+    # Optional: Hugging Face Space client for remote Cellpose segmentation
+    "space": [
+        "gradio_client>=0.15.0",
+        # PyYAML is optional; used to read analysis/config.yaml for tokens
+        "PyYAML>=6.0",
+    ],
     "dev": [
         "pytest>=7.0.0",
         "pytest-cov>=3.0.0",
@@ -66,6 +82,8 @@ extras_require = {
         "xlsxwriter>=3.0.0",
         "stardist>=0.8.0",
         "tensorflow>=2.8.0",
+        "gradio_client>=0.15.0",
+        "PyYAML>=6.0",
     ],
 }
 
