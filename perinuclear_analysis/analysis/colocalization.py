@@ -24,6 +24,16 @@ except Exception:
     # Allow running standalone in a notebook if needed
     ImageLoader = None  # type: ignore
 
+# Optional preprocessing utilities (bleed-through unmixing and ROI percentile background)
+try:
+    from ..imaging_preprocessing.background_subtraction import (
+        apply_bleedthrough_unmix,
+        subtract_background_percentile_roi,
+    )
+except Exception:
+    apply_bleedthrough_unmix = None  # type: ignore
+    subtract_background_percentile_roi = None  # type: ignore
+
 logger = logging.getLogger(__name__)
 
 
@@ -533,7 +543,7 @@ def compute_colocalization(
     channel_a: Union[int, str],
     channel_b: Union[int, str],
     *,
-    normalization_scope: str = "mask",  # 'mask'|'global'|'none' (global=all ZYX, mask=union of labels)
+    normalization_scope: str = "none",  # default to none to avoid affecting thresholds
     thresholding: str = "none",  # 'none'|'otsu'|'costes'|'fixed'
     fixed_thresholds: Optional[Tuple[float, float]] = None,  # used if thresholding='fixed' -> (t_a, t_b)
     channel_names: Optional[List[str]] = None,
@@ -542,6 +552,11 @@ def compute_colocalization(
     max_border_fraction: Optional[float] = None,
     border_margin_px: int = 1,
     plot_mask: bool = True,
+    # Preprocessing controls
+    bleedthrough_matrix: Optional[List[List[float]]] = None,
+    background_subtract: Optional[Dict[str, Any]] = None,  # {"percentile": 1.0}
+    # Threshold domain selection
+    threshold_domain: str = "raw",  # 'raw'|'normalized'
 ) -> Dict[str, Any]:
     """
     Compute colocalization metrics between two channels on a ZYXC post-processed image.
@@ -612,6 +627,19 @@ def compute_colocalization(
     # Build union mask (labels>0) AFTER filtering
     union_mask = (mask_2d > 0)
 
+    # Optional preprocessing before metrics
+    if bleedthrough_matrix is not None:
+        if apply_bleedthrough_unmix is None:
+            raise RuntimeError("Bleed-through unmix utility unavailable")
+        mat = np.asarray(bleedthrough_matrix, dtype=np.float32)
+        img = apply_bleedthrough_unmix(img, mat)  # type: ignore[arg-type]
+
+    if background_subtract is not None:
+        if subtract_background_percentile_roi is None:
+            raise RuntimeError("Background subtraction utility unavailable")
+        perc = float(background_subtract.get("percentile", 1.0))
+        img = subtract_background_percentile_roi(img, union_mask, percentile=perc)  # type: ignore[arg-type]
+
     # Collect vectors for normalization
     if normalization_scope == "mask":
         a_all, b_all = _extract_channel_vectors(img, ch_a, ch_b, union_mask)
@@ -651,11 +679,19 @@ def compute_colocalization(
             }
 
         if a_mm is not None:
-            a, b = _normalize(a_mm, b_mm, a_raw, b_raw)  # type: ignore[arg-type]
+            a_norm, b_norm = _normalize(a_mm, b_mm, a_raw, b_raw)  # type: ignore[arg-type]
         else:
-            a, b = a_raw, b_raw
+            a_norm, b_norm = a_raw, b_raw
 
-        r = _safe_corrcoef(a, b)
+        r = _safe_corrcoef(a_norm, b_norm)
+        # Select domain for threshold discovery and Manders
+        if threshold_domain == "raw":
+            a_tsrc, b_tsrc = a_raw, b_raw
+        elif threshold_domain == "normalized":
+            a_tsrc, b_tsrc = a_norm, b_norm
+        else:
+            raise ValueError("threshold_domain must be one of {'raw','normalized'}")
+
         # Determine thresholds for Manders
         t_a: Optional[float]
         t_b: Optional[float]
@@ -663,10 +699,10 @@ def compute_colocalization(
             t_a = None
             t_b = None
         elif thresholding == "otsu":
-            t_a = _otsu_threshold_1d(a)
-            t_b = _otsu_threshold_1d(b)
+            t_a = _otsu_threshold_1d(a_tsrc)
+            t_b = _otsu_threshold_1d(b_tsrc)
         elif thresholding == "costes":
-            ta_c, tb_c = _costes_thresholds(a, b)
+            ta_c, tb_c = _costes_thresholds(a_tsrc, b_tsrc)
             t_a = ta_c
             t_b = tb_c
         elif thresholding == "fixed":
@@ -676,9 +712,9 @@ def compute_colocalization(
         else:
             raise ValueError("thresholding must be one of {'none','otsu','costes','fixed'}")
 
-        m1, m2 = _manders_m1_m2(a, b, t_a=t_a, t_b=t_b)
-        ov = _overlap_coefficient(a, b)
-        jac = _jaccard_on_positive(a, b)
+        m1, m2 = _manders_m1_m2(a_tsrc, b_tsrc, t_a=t_a, t_b=t_b)
+        ov = _overlap_coefficient(a_norm, b_norm)
+        jac = _jaccard_on_positive(a_norm, b_norm)
 
         return {
             "pearson_r": float(r),
@@ -733,6 +769,7 @@ def compute_colocalization(
         "channel_b": names[ch_b] if names and ch_b < len(names) else ch_b,
         "normalization_scope": normalization_scope,
         "thresholding": thresholding,
+        "threshold_domain": threshold_domain,
         "filtering": filter_info,
         "results": {
             "per_label": per_label,
