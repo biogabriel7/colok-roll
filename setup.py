@@ -88,14 +88,14 @@ extras_require = {
 }
 
 setup(
-    name="perinuclear-analysis",
+    name="colokroll",
     version="0.1.0",
     author="Gabriel Duarte",
     author_email="gabriel.duarte@osumc.edu",
-    description="A phased implementation module for perinuclear signal analysis in microscopy images",
+    description="A phased implementation module for confocal microscopy image analysis",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/TheSaezAtienzarLab/perinuclear-analysis",
+    url="https://github.com/TheSaezAtienzarLab/colok-roll",
     packages=find_packages(),
     classifiers=[
         "Development Status :: 3 - Alpha",
@@ -114,11 +114,11 @@ setup(
     extras_require=extras_require,
     entry_points={
         "console_scripts": [
-            "perinuclear-analyze=perinuclear_analysis.cli:main",
+            "colokroll-analyze=colokroll.cli:main",
         ],
     },
     include_package_data=True,
     package_data={
-        "perinuclear_analysis": ["data/*.json", "templates/*"],
+        "colokroll": ["data/*.json", "templates/*"],
     },
 )

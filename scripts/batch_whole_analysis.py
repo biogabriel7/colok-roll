@@ -43,10 +43,10 @@ import imageio.v3 as iio
 
 from gradio_client import Client, handle_file
 
-from perinuclear_analysis.data_processing import ImageLoader
-from perinuclear_analysis.imaging_preprocessing.background_subtraction.background_subtractor import BackgroundSubtractor
-from perinuclear_analysis.analysis.segmentation_config import get_hf_token
-from perinuclear_analysis.analysis.colocalization import (
+from colokroll.data_processing import ImageLoader
+from colokroll.imaging_preprocessing.background_subtraction.background_subtractor import BackgroundSubtractor
+from colokroll.analysis.segmentation_config import get_hf_token
+from colokroll.analysis.colocalization import (
     compute_colocalization,
     export_colocalization_json,
     estimate_min_area_threshold,

@@ -1,32 +1,29 @@
 #!/bin/bash
-#SBATCH --job-name=bioimage_analysis
-#SBATCH --account=PAS2598
+#SBATCH --job-name=colokroll
+#SBATCH --account={account}
 #SBATCH --time=2:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus-per-node=1
-#SBATCH --mem=32gb
-#SBATCH --output=bioimage_%j.out
-#SBATCH --error=bioimage_%j.err
+#SBATCH --output=colokroll%j.out
+#SBATCH --error=colokroll%j.err
 
 module load cuda/12.6.2
 
-# Ensure conda is available in non-interactive shells
 source ~/.bashrc
-# or: source ~/miniconda3/etc/profile.d/conda.sh
-conda activate bioimage_analyzer
+conda activate colok-roll
 
 # Optional: set working directory to repo root to make relative paths robust
-cd /users/PAS2598/duarte63/GitHub/perinuclear_analysis
+cd /users/{account}/{user}/GitHub/colok-roll
 
 echo "Job started on $(hostname) at $(date)"
 echo "Using GPU: $CUDA_VISIBLE_DEVICES"
 
 python scripts/batch_whole_analysis.py \
-  --input-dir /fs/scratch/PAS2598/duarte63/ALIX_confocal_data/ALIX/nd2 \
-  --patterns "*.ome.tiff" \
-  --output-dir /fs/scratch/PAS2598/duarte63/outputs \
+  --input-dir /fs/scratch/{account}/{user}/confocal_data/ \
+  --patterns "*.ome.tiff" \ 
+  --output-dir /fs/scratch/{account}/{user}/outputs \
   --log-level INFO
 
 echo "Job completed at $(date)"

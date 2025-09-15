@@ -1,231 +1,297 @@
-# Perinuclear Analysis Module
+# colok&roll
 
-A comprehensive Python module for analyzing subcellular localization changes in microscopy images, with specific focus on perinuclear signal detection and quantification.
+A comprehensive Python library for analyzing signals in confocal microscopy images. This library provides a phased implementation approach for processing 3D z-stack images, performing cell segmentation, background subtraction, and colocalization analysis.
 
-## Overview
+## Features
 
-This module processes .nd2 microscopy images with .tif masks to study signal distribution in different cellular regions, particularly changes in subcellular localization after treatment. The analysis includes:
+### **Core Functionality**
+- **3D Image Processing**: Load and process whatever file format confocal microscopy images 
+- **Cell Segmentation**: Automated cell segmentation using Cellpose via Hugging Face Spaces
+- **Background Subtraction**: CUDA-accelerated background subtraction
+- **Colocalization Analysis**: Quantitative analysis of protein colocalization patterns
+- **Multi-channel Support**: Handle complex multi-channel fluorescence images
 
-- Maximum Intensity Projection (MIP) creation from z-stacks
-- Cell and nuclei detection using state-of-the-art segmentation models
-- Concentric ring analysis (5μm and 10μm from nuclei)
-- Signal quantification in different cellular regions
-- Statistical analysis and visualization
+### ⚡ **Performance Optimizations**
+- **CUDA Acceleration**: GPU-accelerated processing
+- **Memory Efficient**: Chunk-based processing optimized
 
-## Phased Implementation Approach
-
-The module is implemented in 5 distinct phases, allowing incremental testing and validation:
-
-### Phase 1: Infrastructure & Image Loading ✓
-- Basic package structure and configuration
-- .nd2 and .tif file loading
-- Metadata extraction and validation
-- Pixel calibration and coordinate management
-
-### Phase 2: MIP Creation & Basic Visualization
-- Maximum Intensity Projection generation
-- Multi-channel handling
-- Basic visualization tools
-- Quality control metrics
-
-### Phase 3: Cell & Nuclei Segmentation
-- Cell detection using Cellpose
-- Nuclei detection from DAPI signal
-- Area-based filtering
-- Segmentation validation
-
-### Phase 4: Ring Analysis
-- 5μm perinuclear ring creation
-- 10μm ring with exclusion zone
-- Pixel-to-micron conversions
-- Boundary management
-
-### Phase 5: Signal Quantification & Complete Pipeline
-- Regional signal quantification
-- Statistical analysis
-- Complete workflow integration
-- Advanced visualizations
+### 🎯 **Research Applications**
+- Protein colocalization studies
+- Cell morphology analysis
+- High-throughput microscopy data processing
 
 ## Installation
 
-### Basic Installation (Phase 1)
+### Basic Installation
+
 ```bash
-pip install -r requirements.txt
+pip install colokroll
 ```
 
-### Phase-Specific Installation
+### Phase-specific Installation
+
+Install specific functionality phases:
+
 ```bash
-# Install with phase-specific dependencies
-pip install .[phase1]  # Basic infrastructure
-pip install .[phase2]  # MIP creation
-pip install .[phase3]  # Segmentation
-pip install .[phase4]  # Ring analysis
-pip install .[phase5]  # Complete pipeline
+# Phase 1-2: Core functionality (image loading, MIP creation, visualization)
+pip install colokroll[phase1,phase2]
+
+# Phase 3: Cell segmentation
+pip install colokroll[phase3]
+
+# Phase 4: Ring analysis
+pip install colokroll[phase4]
+
+# Phase 5: Complete analysis pipeline
+pip install colokroll[phase5]
+
+# All features
+pip install colokroll[all]
+```
+
+### CUDA Support (Optional)
+
+For GPU acceleration, install CUDA dependencies:
+
+```bash
+# For CUDA 12.x
+pip install colokroll[cuda12]
+
+# For CUDA 11.x
+pip install colokroll[cuda11]
 ```
 
 ### Development Installation
+
 ```bash
+git clone https://github.com/TheSaezAtienzarLab/colok-roll.git
+cd colok-roll
 pip install -e .[dev]
 ```
 
 ## Quick Start
 
-### Phase 1: Loading Images
-```python
-from perinuclear_analysis import ImageLoader
+### Basic Image Analysis
 
-# Load .nd2 microscopy image
+```python
+from colokroll import ImageLoader, CellSegmenter, BackgroundSubtractor
+
+# Load image
 loader = ImageLoader()
-image_data = loader.load_nd2("path/to/image.nd2")
-print(f"Image shape: {image_data.shape}")
-print(f"Pixel size: {loader.get_pixel_size()} μm")
+image = loader.load_image("path/to/image.ome.tiff")
 
-# Load .tif mask
-mask = loader.load_tif_mask("path/to/mask.tif")
-```
+# Rename channels for clarity
+channel_names = loader.rename_channels(['LAMP1', 'Phalloidin', 'ALIX', 'DAPI'])
 
-### Phase 2: Creating MIP
-```python
-from perinuclear_analysis import MIPCreator
+# Background subtraction
+bg_subtractor = BackgroundSubtractor()
+processed_image = bg_subtractor.process(image, channel_names=['LAMP1', 'Phalloidin'])
 
-# Create Maximum Intensity Projection
-mip_creator = MIPCreator()
-mip = mip_creator.create_mip(image_data, method='max')
-
-# Visualize MIP
-mip_creator.visualize_mip(mip, channels=['DAPI', 'GFP', 'RFP'])
-```
-
-### Phase 3: Segmentation
-```python
-from perinuclear_analysis import CellSegmenter, NucleiDetector
-
-# Segment cells
-cell_segmenter = CellSegmenter()
-cell_masks = cell_segmenter.segment(mip, min_area=100)
-
-# Detect nuclei
-nuclei_detector = NucleiDetector()
-nuclei_masks = nuclei_detector.detect(mip[:,:,0])  # DAPI channel
-```
-
-### Phase 4: Ring Analysis
-```python
-from perinuclear_analysis import RingAnalyzer
-
-# Create concentric rings
-ring_analyzer = RingAnalyzer(pixel_size=0.325)  # μm/pixel
-rings_5um = ring_analyzer.create_5um_rings(nuclei_masks)
-rings_10um = ring_analyzer.create_10um_rings(nuclei_masks, cell_masks)
-```
-
-### Phase 5: Complete Analysis
-```python
-from perinuclear_analysis import PerinuclearAnalyzer
-
-# Run complete analysis pipeline
-analyzer = PerinuclearAnalyzer()
-results = analyzer.analyze(
-    nd2_path="path/to/image.nd2",
-    mask_path="path/to/mask.tif",
-    output_dir="results/"
+# Cell segmentation
+segmenter = CellSegmenter()
+result = segmenter.segment_from_file(
+    "path/to/image.ome.tiff",
+    channel_names=channel_names,
+    channel_a='Phalloidin',
+    channel_b='DAPI'
 )
-
-# Access quantification results
-print(results.get_statistics())
-analyzer.plot_results()
 ```
 
-## Workflow Overview
+### Batch Processing
 
-```
-Input Files (.nd2, .tif)
-        ↓
-[Phase 1] Load & Validate
-        ↓
-[Phase 2] Create MIP
-        ↓
-[Phase 3] Segment Cells & Nuclei
-        ↓
-[Phase 4] Generate Ring Masks
-        ↓
-[Phase 5] Quantify Signals
-        ↓
-Statistical Analysis & Visualization
-```
-
-## Testing
-
-Each phase has its own test suite:
+Use the provided batch processing script:
 
 ```bash
-# Test specific phase
-pytest tests/test_phase1.py -v
-pytest tests/test_phase2.py -v
-pytest tests/test_phase3.py -v
-pytest tests/test_phase4.py -v
-pytest tests/test_phase5.py -v
-
-# Run all tests
-pytest tests/ -v
-
-# Run with coverage
-pytest tests/ --cov=perinuclear_analysis
+python scripts/batch_whole_analysis.py \
+  --input-dir /path/to/images \
+  --output-dir /path/to/outputs \
+  --patterns "*.ome.tiff"
 ```
 
-## Examples
+### SLURM Cluster Usage
 
-See the `examples/` directory for phase-specific example scripts:
+For HPC environments, use the provided SLURM script:
 
-- `phase1_image_loading.py` - Basic image loading and metadata extraction
-- `phase2_mip_creation.py` - MIP generation and visualization
-- `phase3_segmentation.py` - Cell and nuclei segmentation
-- `phase4_ring_analysis.py` - Ring mask creation and validation
-- `phase5_complete_analysis.py` - Full pipeline demonstration
+```bash
+sbatch run_cli.sh
+```
 
-## Output Structure
+## Architecture
+
+### Phase-based Design
+
+The library is organized into 5 phases, each building upon the previous:
+
+- **Phase 1**: Infrastructure & Image Loading
+- **Phase 2**: MIP Creation & Basic Visualization  
+- **Phase 3**: Cell & Nuclei Segmentation
+- **Phase 4**: Ring Analysis
+- **Phase 5**: Signal Quantification & Complete Pipeline
+
+### Module Structure
 
 ```
-results/
-├── mip/                    # Maximum intensity projections
-├── segmentation/           # Cell and nuclei masks
-├── ring_masks/            # Concentric ring masks
-├── quantification/        # Signal measurements
-├── statistics/            # Statistical analysis results
-└── visualizations/        # Plots and figures
+perinuclear_analysis/
+├── core/                    # Configuration and utilities
+├── data_processing/         # Image loading and MIP creation
+├── imaging_preprocessing/   # Background subtraction, denoising
+├── analysis/               # Cell segmentation, colocalization
+└── visualization/          # Plotting and visualization tools
 ```
 
 ## Configuration
 
-Key parameters can be configured in `perinuclear_analysis/config.py`:
+### Preprocessing Templates
 
-- Pixel size calibration
-- Segmentation thresholds
-- Ring distances (5μm, 10μm)
-- Minimum cell area
-- Background correction methods
-- Output formats
+The library includes pre-configured templates for common analysis scenarios:
+
+```python
+from colokroll.core import create_preprocessing_templates
+
+# Create analysis-specific templates
+templates = create_preprocessing_templates()
+
+# Available templates:
+# - standard_4channel: General purpose DAPI/Phalloidin/LAMP1/GAL3
+# - colocalization_optimized: Conservative parameters for quantitative accuracy
+# - high_throughput: Speed/memory optimized for batch processing
+# - quality_assessment: Maximum quality with detailed metrics
+```
+
+### Custom Configuration
+
+```python
+from colokroll.core import BackgroundSubtractionConfig
+
+config = BackgroundSubtractionConfig(
+    method="rolling_ball",
+    radius=30,
+    light_background=False
+)
+
+bg_subtractor = BackgroundSubtractor(config=config)
+```
+
+## Supported File Formats
+
+- **OME-TIFF**: Primary format with full metadata support
+- **ND2**: Nikon NIS-Elements files
+- **TIFF**: Standard TIFF files
+- **PNG/JPG**: For visualization outputs
 
 ## Requirements
 
+### System Requirements
 - Python 3.8+
-- nd2reader for .nd2 file support
-- scikit-image for image processing
-- numpy for numerical operations
-- matplotlib for visualization
-- cellpose for cell segmentation (Phase 3+)
-- pandas for data management (Phase 5)
+- 16GB+ RAM (recommended for large 3D datasets)
+- CUDA-compatible GPU (optional, for acceleration)
+
+### Dependencies
+
+**Core Dependencies:**
+- numpy >= 1.20.0
+- scikit-image >= 0.19.0
+- matplotlib >= 3.5.0
+- nd2reader >= 3.3.0
+- tifffile >= 2023.7.10
+
+**Optional Dependencies:**
+- cellpose >= 2.0.0 (segmentation)
+- torch >= 1.10.0 (ML models)
+- cupy (CUDA acceleration)
+- pandas, seaborn (data analysis)
+
+## Examples
+
+### Complete Analysis Pipeline
+
+```python
+import numpy as np
+from colokroll import (
+    ImageLoader, 
+    BackgroundSubtractor, 
+    CellSegmenter,
+    compute_colocalization
+)
+
+# 1. Load and preprocess image
+loader = ImageLoader()
+image = loader.load_image("sample.ome.tiff")
+channels = loader.rename_channels(['LAMP1', 'Phalloidin', 'ALIX', 'DAPI'])
+
+# 2. Background subtraction
+bg_subtractor = BackgroundSubtractor()
+processed = bg_subtractor.process(image, channel_names=channels)
+
+# 3. Cell segmentation
+segmenter = CellSegmenter()
+segmentation_result = segmenter.segment_from_file(
+    "sample.ome.tiff",
+    channel_names=channels,
+    channel_a='Phalloidin',
+    channel_b='DAPI'
+)
+
+# 4. Colocalization analysis
+coloc_results = compute_colocalization(
+    image=processed,
+    channel_a='ALIX',
+    channel_b='LAMP1',
+    masks=segmentation_result.mask_array
+)
+```
+
+### Visualization
+
+```python
+from colokroll.visualization import plot_mip, plot_channels
+
+# Plot MIP projections
+plot_mip(image, channels=['LAMP1', 'Phalloidin', 'ALIX', 'DAPI'])
+
+# Plot individual channels
+plot_channels(image, channel_names=channels)
+```
+
+## Contributing
+
+We welcome contributions! Please see our contributing guidelines for details on:
+
+- Code style and standards
+- Testing requirements
+- Documentation standards
+- Pull request process
 
 ## Citation
 
-If you use this module in your research, please cite:
-```
+If you use this library in your research, please cite:
+
+```bibtex
+@software{perinuclear_analysis,
+  title={Perinuclear Analysis: A Python Library for Confocal Microscopy Image Analysis},
+  author={Gabriel Duarte},
+  year={2024},
+  url={https://github.com/TheSaezAtienzarLab/colok-roll}
+}
 ```
 
 ## License
 
-MIT License - see LICENSE file for details
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Support
 
-For issues, questions, or contributions, please open an issue on GitHub or contact the maintainers.
+- **Documentation**: [GitHub Wiki](https://github.com/TheSaezAtienzarLab/colok-roll/wiki)
+- **Issues**: [GitHub Issues](https://github.com/TheSaezAtienzarLab/colok-roll/issues)
+- **Email**: gabriel.duarte@osumc.edu
+
+## Acknowledgments
+
+- Built for the Saez-Atienzar Lab at The Ohio State University
+- Utilizes Cellpose for cell segmentation
+- CUDA acceleration powered by CuPy
+- Image I/O supported by nd2reader and tifffile
+
+---
+
+**Note**: This library is in active development. Some features may be experimental or subject to change.

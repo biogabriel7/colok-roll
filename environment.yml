@@ -1,4 +1,4 @@
-name: perinuclear_analysis
+name: colokroll
 channels:
   - conda-forge
   - defaults
