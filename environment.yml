@@ -18,6 +18,7 @@ dependencies:
   # Image I/O and processing
   - tifffile>=2023.7.10
   - nd2reader>=3.3.0
+  - imageio>=2.31.0
   
   # CUDA acceleration (optional - will be available if CUDA is installed)
   - cupy  # GPU-accelerated NumPy
@@ -30,6 +31,8 @@ dependencies:
   # Data analysis (for future phases)
   - pandas>=1.4.0
   - seaborn>=0.11.0
+  - openpyxl>=3.0.0
+  - xlsxwriter>=3.0.0
   
   # Testing and development
   - pytest>=7.0.0
@@ -40,9 +43,16 @@ dependencies:
   # Documentation
   - sphinx>=4.5.0
   - sphinx-rtd-theme
+  - pyyaml>=6.0
+
+  # Segmentation and computer vision
+  - scipy>=1.7.0  # ensure available before pip extras
   
   # Pip dependencies (for packages not available in conda)
   - pip
   - pip:
-    # Add any pip-only dependencies here
     - aicsimageio>=4.13.0
+    - cellpose>=2.0.0
+    - torch>=1.10.0
+    - opencv-python>=4.5.0
+    - gradio_client>=0.15.0
