@@ -45,4 +45,4 @@ dependencies:
   - pip
   - pip:
     # Add any pip-only dependencies here
-    # - some-pip-only-package>=1.0.0
+    - aicsimageio>=4.13.0

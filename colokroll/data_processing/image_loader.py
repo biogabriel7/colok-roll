@@ -73,7 +73,7 @@ class ImageLoader:
         
         # Determine file format
         suffix = filepath.suffix.lower()
-        
+
         if suffix == '.nd2' and should_convert:
             # Convert ND2 to OME-TIFF
             logger.info(f"Converting {filepath.name} to OME-TIFF format for pipeline compatibility")
@@ -104,6 +104,31 @@ class ImageLoader:
             # Load ND2 directly (original behavior)
             return self.load_nd2(filepath)
         
+        elif suffix == '.oir' and should_convert:
+            logger.info(f"Converting {filepath.name} to OME-TIFF format for pipeline compatibility")
+
+            ome_tiff_path = filepath.with_suffix('.ome.tiff')
+            if ome_tiff_path.exists():
+                metadata_path = ome_tiff_path.with_suffix('.json')
+                if metadata_path.exists():
+                    logger.info(f"Using existing converted file: {ome_tiff_path}")
+                    self.converted_files[str(filepath)] = ome_tiff_path
+                    return self.load_tiff_with_metadata(ome_tiff_path)
+
+            output_path, metadata = self.converter.oir_to_ome_tiff(filepath, ome_tiff_path, save_metadata=True)
+            self.converted_files[str(filepath)] = output_path
+
+            self.metadata = metadata
+            self.pixel_size_um = metadata.get('pixel_size_um')
+            self.channels = metadata.get('channel_names', [])
+
+            return self.load_tiff_with_metadata(output_path)
+
+        elif suffix == '.oir' and not should_convert:
+            raise ValueError(
+                "Direct loading of .oir files is not supported. Enable auto_convert or pass force_convert=True."
+            )
+
         elif suffix in ['.tif', '.tiff']:
             # Check if this is a converted file with metadata
             metadata_path = filepath.with_suffix('.json')

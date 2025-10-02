@@ -1,6 +1,6 @@
 """
 Format converter for microscopy image files.
-Converts .nd2 files to .ome.tiff while preserving metadata.
+Supports converting proprietary formats (e.g., .nd2, .oir) to OME-TIFF while preserving metadata.
 """
 
 import os
@@ -85,6 +85,100 @@ class FormatConverter:
             return output_path, metadata
             
         except Exception as e:
+            logger.error(f"Failed to convert {input_path}: {e}")
+            raise ValueError(f"Conversion failed: {e}")
+
+    def oir_to_ome_tiff(
+        self,
+        input_path: Union[str, Path],
+        output_path: Optional[Union[str, Path]] = None,
+        save_metadata: bool = True,
+    ) -> Tuple[Path, Dict[str, Any]]:
+        """Convert .oir (Olympus) files to .ome.tiff with metadata preservation.
+
+        Args:
+            input_path: Path to the input .oir file.
+            output_path: Optional output path for the .ome.tiff result. Defaults to same name with .ome.tiff.
+            save_metadata: If True, writes a sidecar JSON with extracted metadata.
+
+        Returns:
+            Tuple of (output_path, metadata_dict).
+
+        Raises:
+            FileNotFoundError: If the input file is missing.
+            ImportError: If optional dependency aicsimageio is unavailable.
+            ValueError: If conversion fails.
+        """
+        input_path = Path(input_path)
+        if not input_path.exists():
+            raise FileNotFoundError(f"Input file not found: {input_path}")
+
+        if input_path.suffix.lower() != ".oir":
+            raise ValueError(f"Input file must be .oir format, got: {input_path.suffix}")
+
+        try:
+            from aicsimageio import AICSImage  # type: ignore
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise ImportError(
+                "aicsimageio is required for OIR conversion. Install with: pip install aicsimageio"
+            ) from exc
+
+        if output_path is None:
+            output_path = input_path.with_suffix(".ome.tiff")
+        else:
+            output_path = Path(output_path)
+
+        logger.info(f"Converting {input_path} to {output_path}")
+
+        try:
+            image = AICSImage(str(input_path))
+            data = image.get_image_data("ZYXC")
+
+            # Gather metadata with sensible fallbacks
+            channel_names = list(getattr(image, "channel_names", []) or [])
+            if not channel_names:
+                channel_names = [f"Channel_{idx}" for idx in range(data.shape[-1])]
+
+            pixel_sizes = getattr(image, "physical_pixel_sizes", None)
+            pixel_size_y = float(pixel_sizes.Y) if pixel_sizes and pixel_sizes.Y else None
+            pixel_size_x = float(pixel_sizes.X) if pixel_sizes and pixel_sizes.X else None
+            voxel_size_z = float(pixel_sizes.Z) if pixel_sizes and pixel_sizes.Z else None
+            pixel_size_um = pixel_size_y or pixel_size_x
+
+            metadata: Dict[str, Any] = {
+                "original_format": "oir",
+                "axes": "ZYXC",
+                "channel_names": channel_names,
+                "pixel_size_um": pixel_size_um,
+                "pixel_info": {
+                    "pixel_microns": pixel_size_um,
+                    "pixel_microns_x": pixel_size_x,
+                    "pixel_microns_y": pixel_size_y,
+                    "voxel_size_z": voxel_size_z,
+                    "calibration": None,
+                },
+                "dimensions": {
+                    "width": data.shape[2],
+                    "height": data.shape[1],
+                    "z_levels": data.shape[0],
+                    "channels": data.shape[3],
+                    "timepoints": getattr(image, "dims", {}).T if hasattr(getattr(image, "dims", None), "T") else 1,
+                },
+                "scene": getattr(image, "current_scene", None),
+            }
+
+            self._save_as_tiff(data, output_path, metadata)
+
+            if save_metadata:
+                metadata_path = output_path.with_suffix(".json")
+                self._save_metadata_json(metadata, metadata_path)
+                logger.info(f"Metadata saved to {metadata_path}")
+
+            self.metadata_cache[str(output_path)] = metadata
+            logger.info(f"Successfully converted to {output_path}")
+            return output_path, metadata
+
+        except Exception as e:  # noqa: BLE001
             logger.error(f"Failed to convert {input_path}: {e}")
             raise ValueError(f"Conversion failed: {e}")
     
@@ -526,4 +620,49 @@ class FormatConverter:
                 logger.error(f"Failed to convert {nd2_file}: {e}")
                 conversions[nd2_file] = None
         
+        return conversions
+
+    def batch_convert_oir(
+        self,
+        input_dir: Union[str, Path],
+        output_dir: Optional[Union[str, Path]] = None,
+        pattern: str = "*.oir",
+    ) -> Dict[Path, Optional[Path]]:
+        """Convert multiple OIR files to OME-TIFF format.
+
+        Args:
+            input_dir: Directory containing OIR files.
+            output_dir: Output directory for OME-TIFF files. If None, uses input_dir.
+            pattern: File pattern to match (default: "*.oir").
+
+        Returns:
+            Dictionary mapping input paths to output paths (or None on failure).
+        """
+        input_dir = Path(input_dir)
+        if not input_dir.exists():
+            raise FileNotFoundError(f"Input directory not found: {input_dir}")
+
+        if output_dir is None:
+            output_dir = input_dir
+        else:
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+        oir_files = list(input_dir.glob(pattern))
+        logger.info(f"Found {len(oir_files)} OIR files to convert")
+
+        conversions: Dict[Path, Optional[Path]] = {}
+        for oir_file in oir_files:
+            try:
+                output_file = output_dir / oir_file.with_suffix('.ome.tiff').name
+                output_path, _ = self.oir_to_ome_tiff(oir_file, output_file)
+                conversions[oir_file] = output_path
+                logger.info(f"Converted: {oir_file.name} -> {output_path.name}")
+            except ImportError as exc:
+                logger.error(f"Skipping {oir_file}: {exc}")
+                conversions[oir_file] = None
+            except Exception as e:
+                logger.error(f"Failed to convert {oir_file}: {e}")
+                conversions[oir_file] = None
+
         return conversions

@@ -5,6 +5,7 @@ scikit-image>=0.19.0
 matplotlib>=3.5.0
 Pillow>=9.0.0
 tifffile>=2023.7.10
+aicsimageio>=4.13.0
 
 # CUDA acceleration dependencies (optional)
 # Uncomment for GPU acceleration support

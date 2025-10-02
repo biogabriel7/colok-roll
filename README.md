@@ -1,274 +1,107 @@
 # colok&roll
 
-A comprehensive Python library for analyzing signals in confocal microscopy images. This library provides a phased implementation approach for processing 3D z-stack images, performing cell segmentation, background subtraction, and colocalization analysis.
+A Python toolkit for perinuclear and colocalization analysis in confocal microscopy images. The library bundles image loading, preprocessing, segmentation, quantitative analysis, and visualization utilities so you can run the entire workflow with a single installation.
 
 ## Features
-
-### **Core Functionality**
-- **3D Image Processing**: Load and process whatever file format confocal microscopy images 
-- **Cell Segmentation**: Automated cell segmentation using Cellpose via Hugging Face Spaces
-- **Background Subtraction**: CUDA-accelerated background subtraction
-- **Colocalization Analysis**: Quantitative analysis of protein colocalization patterns
-- **Multi-channel Support**: Handle complex multi-channel fluorescence images
-
-### ⚡ **Performance Optimizations**
-- **CUDA Acceleration**: GPU-accelerated processing
-- **Memory Efficient**: Chunk-based processing optimized
-
-### 🎯 **Research Applications**
-- Protein colocalization studies
-- Cell morphology analysis
-- High-throughput microscopy data processing
+- Robust image ingestion with automatic conversion from ND2 and OIR into OME-TIFF while preserving metadata
+- Multi-channel 3D support, including maximum-intensity projections and per-channel utilities
+- CUDA-accelerated background subtraction with automatic CPU fallbacks for non-GPU paths
+- Cell and nuclei segmentation powered by Cellpose and Torch
+- Ring analysis, signal quantification, and colocalization helpers for downstream statistics
+- Ready-to-use visualization helpers for quick inspection of intermediate results
 
 ## Installation
-
-### Basic Installation
-
+### Standard install
 ```bash
 pip install colokroll
 ```
+Installing the package pulls every runtime dependency required for the full pipeline (segmentation, quantification, visualization, and statistics). No extra phase-specific flags are necessary.
 
-### Phase-specific Installation
-
-Install specific functionality phases:
-
-```bash
-# Phase 1-2: Core functionality (image loading, MIP creation, visualization)
-pip install colokroll[phase1,phase2]
-
-# Phase 3: Cell segmentation
-pip install colokroll[phase3]
-
-# Phase 4: Ring analysis
-pip install colokroll[phase4]
-
-# Phase 5: Complete analysis pipeline
-pip install colokroll[phase5]
-
-# All features
-pip install colokroll[all]
-```
-
-### CUDA Support (Optional)
-
-For GPU acceleration, install CUDA dependencies:
+### Optional extras
+Use extras only when you need additional tooling:
 
 ```bash
-# For CUDA 12.x
+# CUDA support (pick the variant that matches your driver/toolkit)
 pip install colokroll[cuda12]
-
-# For CUDA 11.x
 pip install colokroll[cuda11]
+
+# Run Cellpose via the Hugging Face Space client
+pip install colokroll[space]
+
+# Developer tooling (tests, formatting, docs)
+pip install colokroll[dev]
 ```
 
-### Development Installation
-
+### From source
 ```bash
 git clone https://github.com/TheSaezAtienzarLab/colok-roll.git
 cd colok-roll
 pip install -e .[dev]
 ```
 
-## Quick Start
-
-### Basic Image Analysis
-
+## Quick start
 ```python
-from colokroll import ImageLoader, CellSegmenter, BackgroundSubtractor
+from colokroll import ImageLoader, CellSegmenter
+from colokroll.imaging_preprocessing.background_subtraction import BackgroundSubtractor
+from colokroll.visualization import plot_mip
 
-# Load image
 loader = ImageLoader()
-image = loader.load_image("path/to/image.ome.tiff")
+image = loader.load_image("path/to/sample.oir")  # automatically converts to OME-TIFF
+channel_names = loader.get_channel_names() or loader.rename_channels(["LAMP1", "Phalloidin", "ALIX", "DAPI"])
 
-# Rename channels for clarity
-channel_names = loader.rename_channels(['LAMP1', 'Phalloidin', 'ALIX', 'DAPI'])
-
-# Background subtraction
+# Optional preprocessing (requires CUDA if using BackgroundSubtractor)
 bg_subtractor = BackgroundSubtractor()
-processed_image = bg_subtractor.process(image, channel_names=['LAMP1', 'Phalloidin'])
+processed = bg_subtractor.subtract_background(image[..., 0], channel_name=channel_names[0])[0]
 
-# Cell segmentation
 segmenter = CellSegmenter()
 result = segmenter.segment_from_file(
-    "path/to/image.ome.tiff",
+    "path/to/sample.ome.tiff",
     channel_names=channel_names,
-    channel_a='Phalloidin',
-    channel_b='DAPI'
-)
-```
-
-### Batch Processing
-
-Use the provided batch processing script:
-
-```bash
-python scripts/batch_whole_analysis.py \
-  --input-dir /path/to/images \
-  --output-dir /path/to/outputs \
-  --patterns "*.ome.tiff"
-```
-
-### SLURM Cluster Usage
-
-For HPC environments, use the provided SLURM script:
-
-```bash
-sbatch run_cli.sh
-```
-
-## Architecture
-
-### Phase-based Design
-
-The library is organized into 5 phases, each building upon the previous:
-
-- **Phase 1**: Infrastructure & Image Loading
-- **Phase 2**: MIP Creation & Basic Visualization  
-- **Phase 3**: Cell & Nuclei Segmentation
-- **Phase 4**: Ring Analysis
-- **Phase 5**: Signal Quantification & Complete Pipeline
-
-### Module Structure
-
-```
-perinuclear_analysis/
-├── core/                    # Configuration and utilities
-├── data_processing/         # Image loading and MIP creation
-├── imaging_preprocessing/   # Background subtraction, denoising
-├── analysis/               # Cell segmentation, colocalization
-└── visualization/          # Plotting and visualization tools
-```
-
-## Configuration
-
-### Preprocessing Templates
-
-The library includes pre-configured templates for common analysis scenarios:
-
-```python
-from colokroll.core import create_preprocessing_templates
-
-# Create analysis-specific templates
-templates = create_preprocessing_templates()
-
-# Available templates:
-# - standard_4channel: General purpose DAPI/Phalloidin/LAMP1/GAL3
-# - colocalization_optimized: Conservative parameters for quantitative accuracy
-# - high_throughput: Speed/memory optimized for batch processing
-# - quality_assessment: Maximum quality with detailed metrics
-```
-
-### Custom Configuration
-
-```python
-from colokroll.core import BackgroundSubtractionConfig
-
-config = BackgroundSubtractionConfig(
-    method="rolling_ball",
-    radius=30,
-    light_background=False
+    channel_a="Phalloidin",
+    channel_b="DAPI",
 )
 
-bg_subtractor = BackgroundSubtractor(config=config)
+plot_mip(image, channel_names=channel_names)
 ```
 
-## Supported File Formats
+## Workflow overview
+1. Load ND2, OIR, or OME-TIFF files with automatic metadata extraction
+2. (Optional) Apply preprocessing modules: background subtraction, denoising, deconvolution
+3. Segment nuclei and cells, then build perinuclear rings
+4. Quantify channel intensities and compute colocalization statistics
+5. Visualize results or export tables for further analysis
 
-- **OME-TIFF**: Primary format with full metadata support
-- **ND2**: Nikon NIS-Elements files
-- **TIFF**: Standard TIFF files
-- **PNG/JPG**: For visualization outputs
-
-## Requirements
-
-### System Requirements
-- Python 3.8+
-- 16GB+ RAM (recommended for large 3D datasets)
-- CUDA-compatible GPU (optional, for acceleration)
-
-### Dependencies
-
-**Core Dependencies:**
-- numpy >= 1.20.0
-- scikit-image >= 0.19.0
-- matplotlib >= 3.5.0
-- nd2reader >= 3.3.0
-- tifffile >= 2023.7.10
-
-**Optional Dependencies:**
-- cellpose >= 2.0.0 (segmentation)
-- torch >= 1.10.0 (ML models)
-- cupy (CUDA acceleration)
-- pandas, seaborn (data analysis)
-
-## Examples
-
-### Complete Analysis Pipeline
-
-```python
-import numpy as np
-from colokroll import (
-    ImageLoader, 
-    BackgroundSubtractor, 
-    CellSegmenter,
-    compute_colocalization
-)
-
-# 1. Load and preprocess image
-loader = ImageLoader()
-image = loader.load_image("sample.ome.tiff")
-channels = loader.rename_channels(['LAMP1', 'Phalloidin', 'ALIX', 'DAPI'])
-
-# 2. Background subtraction
-bg_subtractor = BackgroundSubtractor()
-processed = bg_subtractor.process(image, channel_names=channels)
-
-# 3. Cell segmentation
-segmenter = CellSegmenter()
-segmentation_result = segmenter.segment_from_file(
-    "sample.ome.tiff",
-    channel_names=channels,
-    channel_a='Phalloidin',
-    channel_b='DAPI'
-)
-
-# 4. Colocalization analysis
-coloc_results = compute_colocalization(
-    image=processed,
-    channel_a='ALIX',
-    channel_b='LAMP1',
-    masks=segmentation_result.mask_array
-)
+## Module layout
+```
+colokroll/
+├── core/                  # Configuration classes and shared utilities
+├── data_processing/       # Image loaders, format conversion, MIP creation
+├── imaging_preprocessing/ # Background subtraction and preprocessing helpers
+├── analysis/              # Segmentation, colocalization, quantification routines
+└── visualization/         # Visualization helpers
 ```
 
-### Visualization
+## Supported file formats
+- OME-TIFF (native processing format)
+- ND2 (Nikon) with conversion to OME-TIFF
+- OIR (Olympus) with conversion to OME-TIFF
+- Standard TIFF/PNG/JPG for masks and derived outputs
 
-```python
-from colokroll.visualization import plot_mip, plot_channels
-
-# Plot MIP projections
-plot_mip(image, channels=['LAMP1', 'Phalloidin', 'ALIX', 'DAPI'])
-
-# Plot individual channels
-plot_channels(image, channel_names=channels)
-```
+## Runtime dependencies
+Installed alongside the package:
+- numpy, scikit-image, matplotlib, Pillow, tifffile, aicsimageio
+- nd2reader for Nikon pipelines
+- cellpose, torch, opencv-python for segmentation
+- scipy, pandas, seaborn, openpyxl, xlsxwriter for quantification and reporting
+- gradio_client and PyYAML when the `space` extra is requested
 
 ## Contributing
-
-We welcome contributions! Please see our contributing guidelines for details on:
-
-- Code style and standards
-- Testing requirements
-- Documentation standards
-- Pull request process
+We welcome pull requests! Please open an issue to discuss large changes, follow the linting/test suite (`pytest`), and format code with `black` before submission.
 
 ## Citation
-
-If you use this library in your research, please cite:
-
 ```bibtex
-@software{perinuclear_analysis,
-  title={Perinuclear Analysis: A Python Library for Confocal Microscopy Image Analysis},
+@software{colokroll,
+  title={colok&roll: A Python Library for Confocal Microscopy Image Analysis},
   author={Gabriel Duarte},
   year={2024},
   url={https://github.com/TheSaezAtienzarLab/colok-roll}
@@ -276,22 +109,8 @@ If you use this library in your research, please cite:
 ```
 
 ## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+Released under the MIT License. See the [LICENSE](LICENSE) file for details.
 
 ## Support
-
-- **Documentation**: [GitHub Wiki](https://github.com/TheSaezAtienzarLab/colok-roll/wiki)
-- **Issues**: [GitHub Issues](https://github.com/TheSaezAtienzarLab/colok-roll/issues)
-- **Email**: gabriel.duarte@osumc.edu
-
-## Acknowledgments
-
-- Built for the Saez-Atienzar Lab at The Ohio State University
-- Utilizes Cellpose for cell segmentation
-- CUDA acceleration powered by CuPy
-- Image I/O supported by nd2reader and tifffile
-
----
-
-**Note**: This library is in active development. Some features may be experimental or subject to change.
+- Issues: https://github.com/TheSaezAtienzarLab/colok-roll/issues
+- Email: gabriel.duarte@osumc.edu
