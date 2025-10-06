@@ -130,6 +130,9 @@ class ImageLoader:
             )
 
         elif suffix in ['.tif', '.tiff']:
+            # Check if this is an OME-TIFF file (use tifffile for these)
+            if '.ome.tif' in str(filepath).lower():
+                return self.load_tiff_with_metadata(filepath)
             # Check if this is a converted file with metadata
             metadata_path = filepath.with_suffix('.json')
             if metadata_path.exists():

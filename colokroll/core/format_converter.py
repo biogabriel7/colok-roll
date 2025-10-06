@@ -94,7 +94,7 @@ class FormatConverter:
         output_path: Optional[Union[str, Path]] = None,
         save_metadata: bool = True,
     ) -> Tuple[Path, Dict[str, Any]]:
-        """Convert .oir (Olympus) files to .ome.tiff with metadata preservation.
+        """Convert .oir (Olympus) files to .ome.tiff using bioformats2raw + raw2ometiff.
 
         Args:
             input_path: Path to the input .oir file.
@@ -105,10 +105,13 @@ class FormatConverter:
             Tuple of (output_path, metadata_dict).
 
         Raises:
-            FileNotFoundError: If the input file is missing.
-            ImportError: If optional dependency aicsimageio is unavailable.
+            FileNotFoundError: If the input file is missing or bioformats2raw/raw2ometiff not found.
             ValueError: If conversion fails.
         """
+        import subprocess
+        import shutil
+        import tempfile
+        
         input_path = Path(input_path)
         if not input_path.exists():
             raise FileNotFoundError(f"Input file not found: {input_path}")
@@ -116,71 +119,138 @@ class FormatConverter:
         if input_path.suffix.lower() != ".oir":
             raise ValueError(f"Input file must be .oir format, got: {input_path.suffix}")
 
-        try:
-            from aicsimageio import AICSImage  # type: ignore
-        except ImportError as exc:  # pragma: no cover - optional dependency
-            raise ImportError(
-                "aicsimageio is required for OIR conversion. Install with: pip install aicsimageio"
-            ) from exc
+        # Check if bioformats2raw and raw2ometiff are available
+        if not shutil.which("bioformats2raw"):
+            raise FileNotFoundError(
+                "bioformats2raw not found. Install with: conda install -c ome bioformats2raw"
+            )
+        if not shutil.which("raw2ometiff"):
+            raise FileNotFoundError(
+                "raw2ometiff not found. Install with: conda install -c ome raw2ometiff"
+            )
 
         if output_path is None:
             output_path = input_path.with_suffix(".ome.tiff")
         else:
             output_path = Path(output_path)
 
-        logger.info(f"Converting {input_path} to {output_path}")
+        logger.info(f"Converting {input_path} to {output_path} using bioformats2raw + raw2ometiff")
 
-        try:
-            image = AICSImage(str(input_path))
-            data = image.get_image_data("ZYXC")
+        # Create temporary directory for intermediate zarr format
+        with tempfile.TemporaryDirectory(prefix="oir_conv_") as temp_dir:
+            temp_zarr = Path(temp_dir) / "temp.zarr"
+            
+            try:
+                # Step 1: Convert OIR to Zarr using bioformats2raw
+                logger.info(f"Step 1: Converting to Zarr format...")
+                cmd_bf2raw = [
+                    "bioformats2raw",
+                    str(input_path),
+                    str(temp_zarr)
+                ]
+                
+                result = subprocess.run(
+                    cmd_bf2raw,
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                logger.info(f"bioformats2raw completed successfully")
+                
+                # Step 2: Convert Zarr to OME-TIFF using raw2ometiff
+                logger.info(f"Step 2: Converting Zarr to OME-TIFF...")
+                cmd_raw2ome = [
+                    "raw2ometiff",
+                    str(temp_zarr),
+                    str(output_path)
+                ]
+                
+                result = subprocess.run(
+                    cmd_raw2ome,
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                logger.info(f"raw2ometiff completed successfully")
+                
+                # Load the converted file to extract metadata
+                with tifffile.TiffFile(str(output_path)) as tif:
+                    data = tif.series[0].asarray()
+                    axes = tif.series[0].axes
+                    
+                    # Extract OME-XML metadata if available
+                    ome_metadata = {}
+                    if hasattr(tif, 'ome_metadata') and tif.ome_metadata:
+                        # Parse OME-XML for detailed metadata
+                        try:
+                            import xml.etree.ElementTree as ET
+                            root = ET.fromstring(tif.ome_metadata)
+                            
+                            # Extract pixel sizes
+                            namespaces = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06'}
+                            pixels = root.find('.//ome:Pixels', namespaces)
+                            if pixels is not None:
+                                pixel_size_x = float(pixels.get('PhysicalSizeX', 0) or 0)
+                                pixel_size_y = float(pixels.get('PhysicalSizeY', 0) or 0)
+                                voxel_size_z = float(pixels.get('PhysicalSizeZ', 0) or 0)
+                                pixel_size_um = (pixel_size_x + pixel_size_y) / 2 if pixel_size_x and pixel_size_y else None
+                            else:
+                                pixel_size_x = pixel_size_y = voxel_size_z = pixel_size_um = None
+                            
+                            # Extract channel names
+                            channels = root.findall('.//ome:Channel', namespaces)
+                            channel_names = [ch.get('Name', f'Channel_{i}') for i, ch in enumerate(channels)]
+                            if not channel_names and data.ndim >= 4:
+                                channel_names = [f'Channel_{i}' for i in range(data.shape[-1])]
+                            
+                        except Exception as e:
+                            logger.warning(f"Could not parse OME-XML metadata: {e}")
+                            pixel_size_x = pixel_size_y = voxel_size_z = pixel_size_um = None
+                            channel_names = [f'Channel_{i}' for i in range(data.shape[-1] if data.ndim >= 4 else 1)]
+                    else:
+                        pixel_size_x = pixel_size_y = voxel_size_z = pixel_size_um = None
+                        channel_names = [f'Channel_{i}' for i in range(data.shape[-1] if data.ndim >= 4 else 1)]
+                
+                # Build metadata dictionary
+                metadata: Dict[str, Any] = {
+                    "original_format": "oir",
+                    "conversion_method": "bioformats2raw + raw2ometiff",
+                    "axes": axes,
+                    "channel_names": channel_names,
+                    "pixel_size_um": pixel_size_um,
+                    "pixel_info": {
+                        "pixel_microns": pixel_size_um,
+                        "pixel_microns_x": pixel_size_x,
+                        "pixel_microns_y": pixel_size_y,
+                        "voxel_size_z": voxel_size_z,
+                        "calibration": None,
+                    },
+                    "dimensions": {
+                        "width": data.shape[2] if data.ndim >= 3 else data.shape[1],
+                        "height": data.shape[1] if data.ndim >= 3 else data.shape[0],
+                        "z_levels": data.shape[0] if data.ndim >= 4 else (data.shape[0] if data.ndim == 3 and 'Z' in axes else 1),
+                        "channels": data.shape[-1] if data.ndim >= 4 else 1,
+                        "timepoints": 1,
+                    },
+                }
 
-            # Gather metadata with sensible fallbacks
-            channel_names = list(getattr(image, "channel_names", []) or [])
-            if not channel_names:
-                channel_names = [f"Channel_{idx}" for idx in range(data.shape[-1])]
+                if save_metadata:
+                    metadata_path = output_path.with_suffix(".json")
+                    self._save_metadata_json(metadata, metadata_path)
+                    logger.info(f"Metadata saved to {metadata_path}")
 
-            pixel_sizes = getattr(image, "physical_pixel_sizes", None)
-            pixel_size_y = float(pixel_sizes.Y) if pixel_sizes and pixel_sizes.Y else None
-            pixel_size_x = float(pixel_sizes.X) if pixel_sizes and pixel_sizes.X else None
-            voxel_size_z = float(pixel_sizes.Z) if pixel_sizes and pixel_sizes.Z else None
-            pixel_size_um = pixel_size_y or pixel_size_x
+                self.metadata_cache[str(output_path)] = metadata
+                logger.info(f"Successfully converted to {output_path}")
+                return output_path, metadata
 
-            metadata: Dict[str, Any] = {
-                "original_format": "oir",
-                "axes": "ZYXC",
-                "channel_names": channel_names,
-                "pixel_size_um": pixel_size_um,
-                "pixel_info": {
-                    "pixel_microns": pixel_size_um,
-                    "pixel_microns_x": pixel_size_x,
-                    "pixel_microns_y": pixel_size_y,
-                    "voxel_size_z": voxel_size_z,
-                    "calibration": None,
-                },
-                "dimensions": {
-                    "width": data.shape[2],
-                    "height": data.shape[1],
-                    "z_levels": data.shape[0],
-                    "channels": data.shape[3],
-                    "timepoints": getattr(image, "dims", {}).T if hasattr(getattr(image, "dims", None), "T") else 1,
-                },
-                "scene": getattr(image, "current_scene", None),
-            }
-
-            self._save_as_tiff(data, output_path, metadata)
-
-            if save_metadata:
-                metadata_path = output_path.with_suffix(".json")
-                self._save_metadata_json(metadata, metadata_path)
-                logger.info(f"Metadata saved to {metadata_path}")
-
-            self.metadata_cache[str(output_path)] = metadata
-            logger.info(f"Successfully converted to {output_path}")
-            return output_path, metadata
-
-        except Exception as e:  # noqa: BLE001
-            logger.error(f"Failed to convert {input_path}: {e}")
-            raise ValueError(f"Conversion failed: {e}")
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Conversion command failed: {e.cmd}")
+                logger.error(f"stdout: {e.stdout}")
+                logger.error(f"stderr: {e.stderr}")
+                raise ValueError(f"Conversion failed: {e.stderr}")
+            except Exception as e:
+                logger.error(f"Failed to convert {input_path}: {e}")
+                raise ValueError(f"Conversion failed: {e}")
     
     def _extract_comprehensive_metadata(self, reader: nd2reader.ND2Reader) -> Dict[str, Any]:
         """Extract comprehensive metadata from ND2 reader.
@@ -567,7 +637,7 @@ class FormatConverter:
                 self.metadata_cache[str(tiff_path)] = metadata
                 return metadata
         
-        # Extract from TIFF tags
+        # Extract from TIFF tags (JSON)
         try:
             with tifffile.TiffFile(tiff_path) as tif:
                 if tif.pages[0].description:
@@ -575,7 +645,63 @@ class FormatConverter:
                     self.metadata_cache[str(tiff_path)] = metadata
                     return metadata
         except Exception as e:
-            logger.warning(f"Could not extract metadata from TIFF: {e}")
+            logger.debug(f"Could not extract JSON metadata from TIFF: {e}")
+        
+        # Try to extract from OME-XML metadata (for OME-TIFF files)
+        try:
+            with tifffile.TiffFile(str(tiff_path)) as tif:
+                if hasattr(tif, 'ome_metadata') and tif.ome_metadata:
+                    import xml.etree.ElementTree as ET
+                    root = ET.fromstring(tif.ome_metadata)
+                    
+                    # Extract pixel sizes
+                    namespaces = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06'}
+                    pixels = root.find('.//ome:Pixels', namespaces)
+                    
+                    pixel_size_x = None
+                    pixel_size_y = None
+                    voxel_size_z = None
+                    pixel_size_um = None
+                    
+                    if pixels is not None:
+                        pixel_size_x = float(pixels.get('PhysicalSizeX', 0) or 0)
+                        pixel_size_y = float(pixels.get('PhysicalSizeY', 0) or 0)
+                        voxel_size_z = float(pixels.get('PhysicalSizeZ', 0) or 0)
+                        if pixel_size_x and pixel_size_y:
+                            pixel_size_um = (pixel_size_x + pixel_size_y) / 2
+                    
+                    # Extract channel names
+                    channels = root.findall('.//ome:Channel', namespaces)
+                    channel_names = [ch.get('Name', f'Channel_{i}') for i, ch in enumerate(channels)]
+                    
+                    # Get image shape
+                    data = tif.series[0].asarray()
+                    axes = tif.series[0].axes
+                    
+                    metadata = {
+                        "original_format": "ome-tiff",
+                        "axes": axes,
+                        "channel_names": channel_names,
+                        "pixel_size_um": pixel_size_um,
+                        "pixel_info": {
+                            "pixel_microns": pixel_size_um,
+                            "pixel_microns_x": pixel_size_x,
+                            "pixel_microns_y": pixel_size_y,
+                            "voxel_size_z": voxel_size_z,
+                        },
+                        "dimensions": {
+                            "width": data.shape[2] if data.ndim >= 3 else data.shape[1],
+                            "height": data.shape[1] if data.ndim >= 3 else data.shape[0],
+                            "z_levels": data.shape[0] if data.ndim >= 4 else (data.shape[0] if data.ndim == 3 and 'Z' in axes else 1),
+                            "channels": data.shape[-1] if 'C' in axes and axes[-1] == 'C' else (data.shape[0] if 'C' in axes and axes[0] == 'C' else 1),
+                            "timepoints": 1,
+                        },
+                    }
+                    
+                    self.metadata_cache[str(tiff_path)] = metadata
+                    return metadata
+        except Exception as e:
+            logger.warning(f"Could not extract OME-XML metadata from TIFF: {e}")
         
         return {}
     

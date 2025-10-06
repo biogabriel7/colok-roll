@@ -2,6 +2,7 @@
 perinuclear_analysis/analysis/config.yaml
 .perinuclear_analysis/
 .config/perinuclear_analysis/config.yaml
+colokroll/analysis/config.yaml
 data/
 manual_coloc.xlsx
 
@@ -24,10 +25,15 @@ cellpose_api.md
 
 data/
 *.tif
+*.tiff
 *.ome.tif
+*.ome.tiff
 *.nd2
+*.oir
+*.json  # Metadata files from conversions
 
 perinuclear_analysis.egg-info/
 
 *.err
 *.out
+sec.txt
