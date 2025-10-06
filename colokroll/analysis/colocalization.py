@@ -722,7 +722,8 @@ def compute_colocalization(
             "manders_m2": float(m2),
             "overlap_r": float(ov),
             "jaccard": float(jac),
-            "n_voxels": float(a.size),
+            # number of voxels used in this ROI (use channel vector length)
+            "n_voxels": float(a_raw.size),
             "thresholds": {"t_a": None if t_a is None else float(t_a), "t_b": None if t_b is None else float(t_b)},
         }
 
