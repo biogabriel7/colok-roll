@@ -22,6 +22,8 @@ import tifffile as tiff
 from ...io import ImageLoader, MIPCreator
 from .config import get_hf_token
 
+# Conversion factor from 16-bit to 8-bit: 65535 / 255 = 257
+UINT16_TO_UINT8_DIVISOR = 257
 
 try:
     from gradio_client import Client, handle_file
@@ -192,7 +194,7 @@ class CellSegmenter:
             path = Path(out_path) if out_path is not None else self.tmp_dir / "cellpose_composite.png"
             # Use 1-99.9 percentiles for 8-bit mapping
             u16 = self._to_u16_percentile(composite01, percentiles=percentiles, apply_clahe=apply_clahe)
-            imwrite(str(path), (u16 // 257).astype(np.uint8))
+            imwrite(str(path), (u16 // UINT16_TO_UINT8_DIVISOR).astype(np.uint8))
             return path
         else:
             raise ValueError("output_format must be one of {'tiff16','png8'}")

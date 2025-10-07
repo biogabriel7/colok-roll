@@ -237,6 +237,12 @@ class PreprocessingConfig:
         return self._get_protein_config()
 
     def _get_dapi_config(self) -> Dict[str, Any]:
+        """Get preprocessing configuration optimized for DAPI/nuclear staining channels.
+        
+        Returns:
+            Dict with background subtraction, denoising, and channel-specific parameters
+            optimized for nuclear staining (larger radius, NL-means denoising).
+        """
         return {
             "background_method": "rolling_ball",
             "background_radius": self.background_subtraction.rolling_ball_radius_dapi,
@@ -251,6 +257,12 @@ class PreprocessingConfig:
         }
 
     def _get_phalloidin_config(self) -> Dict[str, Any]:
+        """Get preprocessing configuration optimized for phalloidin/actin channels.
+        
+        Returns:
+            Dict with background subtraction, denoising, and edge enhancement parameters
+            optimized for cytoskeletal staining (smaller radius, TV denoising, CLAHE).
+        """
         return {
             "background_method": "rolling_ball",
             "background_radius": self.background_subtraction.rolling_ball_radius_phalloidin,
@@ -271,6 +283,12 @@ class PreprocessingConfig:
         }
 
     def _get_lamp1_config(self) -> Dict[str, Any]:
+        """Get preprocessing configuration optimized for LAMP1/lysosomal marker channels.
+        
+        Returns:
+            Dict with background subtraction, denoising, and vesicle detection parameters
+            optimized for punctate lysosomal markers.
+        """
         return {
             "background_method": "rolling_ball",
             "background_radius": self.background_subtraction.rolling_ball_radius_protein,
@@ -286,6 +304,12 @@ class PreprocessingConfig:
         }
 
     def _get_protein_config(self) -> Dict[str, Any]:
+        """Get preprocessing configuration optimized for generic protein marker channels.
+        
+        Returns:
+            Dict with background subtraction, denoising, and detection parameters
+            optimized for protein markers (both punctate and diffuse patterns).
+        """
         return {
             "background_method": "rolling_ball",
             "background_radius": self.background_subtraction.rolling_ball_radius_protein,

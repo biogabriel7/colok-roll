@@ -37,3 +37,5 @@ perinuclear_analysis.egg-info/
 *.err
 *.out
 sec.txt
+NOTEBOOK_UPDATE_SUMMARY.md
+SEGMENTATION_IMPROVEMENTS.md

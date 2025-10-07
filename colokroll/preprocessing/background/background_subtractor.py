@@ -49,19 +49,26 @@ class BackgroundSubtractor:
     """
     Background subtraction processor for 3D confocal z-stack ome.tiff images.
     
+    **IMPORTANT**: This class requires CUDA/CuPy and will raise RuntimeError if unavailable.
+    For CPU-only environments, use scikit-image functions directly.
+    
     Implements multiple background subtraction methods optimized for 3D data:
     - Rolling ball: Best for uneven illumination (slice-by-slice processing)
     - Gaussian: Fast approximation for gradual backgrounds
     - Morphological: For structured backgrounds
+    - Two-stage (gaussian+rolling_ball): Best for complex backgrounds
+    - Auto mode: Automatically selects best method via grid search
     
     Features:
     - CUDA acceleration for 10-50x speedup on compatible GPUs
-    - Automatic CPU fallback when CUDA is not available
-    - Memory-efficient processing with chunk-based operations
+    - Memory-efficient GPU processing
     - Channel-specific parameter auto-selection
     - Integration with existing ImageLoader workflow
     
     Input: 3D numpy arrays (Z, Y, X) from ome.tiff files
+    
+    Note: CPU methods (_subtract_background_cpu, etc.) are retained for potential
+    future use but are currently unreachable due to CUDA-only enforcement.
     """
     
     def __init__(self, config: Optional[BackgroundSubtractionConfig] = None, 
@@ -157,8 +164,14 @@ class BackgroundSubtractor:
             # Check if image fits in GPU memory
             image_memory_gb = image.nbytes / (1024**3)
             if image_memory_gb > self.max_gpu_memory_gb:
-                self.logger.error(f"Image too large for GPU memory ({image_memory_gb:.1f}GB > {self.max_gpu_memory_gb:.1f}GB)")
-                raise MemoryError("Input image exceeds available GPU memory. Consider reducing image size or parameters.")
+                self.logger.error(
+                    f"Image too large for GPU memory: {image_memory_gb:.1f}GB required > {self.max_gpu_memory_gb:.1f}GB available"
+                )
+                raise MemoryError(
+                    f"Input image ({image_memory_gb:.1f}GB) exceeds available GPU memory ({self.max_gpu_memory_gb:.1f}GB). "
+                    f"Suggestions: 1) Process channels separately, 2) Downsample the image, "
+                    f"3) Reduce z-stack size, or 4) Use a GPU with more memory."
+                )
             
             # Transfer image to GPU
             gpu_image = cp.asarray(image, dtype=cp.float32)

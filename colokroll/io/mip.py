@@ -17,6 +17,10 @@ from .loaders import ImageLoader
 
 logger = logging.getLogger(__name__)
 
+# Conversion factor from 16-bit to 8-bit: 65535 / 255 = 257
+# Used for efficient downscaling: (uint16_value // 257) ≈ (uint16_value * 255 / 65535)
+UINT16_TO_UINT8_DIVISOR = 257
+
 
 class MIPCreator:
     """Create Maximum Intensity Projections from z-stack images."""
@@ -334,7 +338,7 @@ class MIPCreator:
                 if max_val > min_val:
                     arr = (arr - min_val) / (max_val - min_val)
                 else:
-                    arr = np.zeros처럼(arr)
+                    arr = np.zeros_like(arr)
             else:
                 if np.issubdtype(mip.dtype, np.floating):
                     arr = np.clip(arr, 0, 1)

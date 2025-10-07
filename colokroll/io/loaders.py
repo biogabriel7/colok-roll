@@ -188,8 +188,10 @@ class ImageLoader:
             self._validate_image_dimensions(image)
             logger.info("Successfully loaded TIFF image with shape: %s", image.shape)
             return image
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Failed to load TIFF file: %s", exc)
+        except ValueError:
+            raise  # Re-raise validation errors as-is
+        except Exception as exc:
+            logger.error("Failed to load TIFF file: %s", exc, exc_info=True)
             raise ValueError(f"Error loading TIFF file: {exc}") from exc
 
     def load_nd2(self, filepath: Union[str, Path]) -> np.ndarray:
@@ -248,8 +250,10 @@ class ImageLoader:
                 logger.info("Pixel size: %s μm", self.pixel_size_um)
                 logger.info("Channels: %s", self.channels)
                 return image_array
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Failed to load ND2 file: %s", exc)
+        except ValueError:
+            raise  # Re-raise validation errors as-is
+        except Exception as exc:
+            logger.error("Failed to load ND2 file: %s", exc, exc_info=True)
             raise ValueError(f"Error loading ND2 file: {exc}") from exc
 
     def _extract_nd2_metadata(self, reader: nd2reader.ND2Reader) -> None:
@@ -291,8 +295,10 @@ class ImageLoader:
             self._validate_mask(mask)
             logger.info("Successfully loaded mask with shape: %s", mask.shape)
             return mask
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Failed to load TIF mask: %s", exc)
+        except ValueError:
+            raise  # Re-raise validation errors as-is
+        except Exception as exc:
+            logger.error("Failed to load TIF mask: %s", exc, exc_info=True)
             raise ValueError(f"Error loading TIF mask: {exc}") from exc
 
     def load_tif_image(self, filepath: Union[str, Path]) -> np.ndarray:
@@ -323,8 +329,10 @@ class ImageLoader:
             self._validate_image_dimensions(image)
             logger.info("Successfully loaded TIF image with shape: %s", image.shape)
             return image
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Failed to load TIF image: %s", exc)
+        except ValueError:
+            raise  # Re-raise validation errors as-is
+        except Exception as exc:
+            logger.error("Failed to load TIF image: %s", exc, exc_info=True)
             raise ValueError(f"Error loading TIF image: {exc}") from exc
 
     def _validate_image_dimensions(self, image: np.ndarray) -> None:

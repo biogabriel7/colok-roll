@@ -1,7 +1,9 @@
 """Analysis API for colokroll."""
 
+from __future__ import annotations
+
 import importlib
-from typing import Any
+from typing import Any, Optional
 
 __all__ = [
     "get_cell_segmenter",
@@ -10,7 +12,7 @@ __all__ = [
 ]
 
 
-def _optional_import(module: str, attr: str | None = None) -> Any:
+def _optional_import(module: str, attr: Optional[str] = None) -> Any:
     try:
         mod = importlib.import_module(module)
         return getattr(mod, attr) if attr else mod

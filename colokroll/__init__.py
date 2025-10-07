@@ -1,4 +1,12 @@
-"""Colokroll microscopy toolkit."""
+"""Colokroll microscopy toolkit.
+
+Import Strategy:
+- Core modules (config, io, visualization, preprocessing) are imported directly
+  as they have only standard dependencies (numpy, etc.)
+- Analysis modules use lazy imports as they have optional dependencies:
+  * Cellpose segmentation requires gradio_client
+  * Colocalization may require cupy for GPU acceleration
+"""
 
 __version__ = "0.1.0"
 __author__ = "Gabriel Duarte"
