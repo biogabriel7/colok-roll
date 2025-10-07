@@ -18,15 +18,15 @@ except Exception:  # pragma: no cover - fallback path
     HAS_CUDA = False
 
 try:
-    # Prefer package import when used inside perinuclear_analysis
-    from ..data_processing.image_loader import ImageLoader
+    # Prefer package 
+    from ..io import ImageLoader
 except Exception:
     # Allow running standalone in a notebook if needed
     ImageLoader = None  # type: ignore
 
 # Optional preprocessing utilities (bleed-through unmixing and ROI percentile background)
 try:
-    from ..imaging_preprocessing.background_subtraction import (
+    from ..preprocessing.background import (
         apply_bleedthrough_unmix,
         subtract_background_percentile_roi,
     )

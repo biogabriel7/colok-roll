@@ -1,6 +1,6 @@
-"""Core infrastructure modules."""
+"""Configuration package for the colokroll toolkit."""
 
-from ..config import (
+from .base import (
     RuntimeConfig,
     ImageIOConfig,
     ProjectionConfig,
@@ -13,29 +13,24 @@ from ..config import (
     DeconvolutionConfig,
     QualityControlConfig,
     ChannelProcessingConfig,
+)
+from .presets import (
     create_runtime_config,
     load_config,
     save_config,
+)
+from .templates import (
     create_preprocessing_templates,
     save_preprocessing_template,
     create_all_preprocessing_templates,
     load_preprocessing_template,
 )
 
-from .utils import (
-    validate_file_path,
-    get_pixel_size_from_metadata,
-    convert_pixels_to_microns,
-    convert_microns_to_pixels,
-    get_fluorophore_color,
-    create_channel_color_mapping,
-    get_colormap_from_fluorophore,
-)
-from .format_converter import FormatConverter
-
 __all__ = [
-    # Configuration classes
     "RuntimeConfig",
+    "create_runtime_config",
+    "load_config",
+    "save_config",
     "ImageIOConfig",
     "ProjectionConfig",
     "SegmentationConfig",
@@ -47,25 +42,9 @@ __all__ = [
     "DeconvolutionConfig",
     "QualityControlConfig",
     "ChannelProcessingConfig",
-    
-    # Configuration functions
-    "create_runtime_config",
-    "load_config",
-    "save_config",
     "create_preprocessing_templates",
     "save_preprocessing_template",
     "create_all_preprocessing_templates",
     "load_preprocessing_template",
-    
-    # Utility functions
-    "validate_file_path",
-    "get_pixel_size_from_metadata",
-    "convert_pixels_to_microns",
-    "convert_microns_to_pixels",
-    "get_fluorophore_color",
-    "create_channel_color_mapping",
-    "get_colormap_from_fluorophore",
-    
-    # Format converter
-    "FormatConverter",
 ]
+
