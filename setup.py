@@ -3,64 +3,39 @@ from setuptools import setup, find_packages
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
-# Core dependencies for basic functionality
+# All dependencies included by default
 install_requires = [
+    # Image I/O and processing
     "nd2reader>=3.3.0",
     "numpy>=1.20.0",
     "scikit-image>=0.19.0",
     "matplotlib>=3.5.0",
     "Pillow>=9.0.0",
-    # Needed at runtime across loaders and analyses
     "tifffile>=2023.7.10",
     "imageio>=2.31.0",
+    # Cell segmentation
+    "cellpose>=2.0.0",
+    "torch>=1.10.0",
+    "opencv-python>=4.5.0",
+    # Alternative segmentation backend
+    "stardist>=0.8.0",
+    "tensorflow>=2.8.0",
+    # Analysis and statistics
+    "scipy>=1.7.0",
+    "pandas>=1.4.0",
+    "seaborn>=0.11.0",
+    # Excel export
+    "openpyxl>=3.0.0",
+    "xlsxwriter>=3.0.0",
+    # GPU acceleration (auto-detects CUDA version)
+    "cupy>=11.0.0",
+    # Remote processing support
+    "gradio_client>=0.15.0",
+    "PyYAML>=6.0",
 ]
 
-# Phase-specific dependencies
+# Development tools only (optional)
 extras_require = {
-    "phase1": [
-        # Phase 1 uses only core dependencies
-    ],
-    "phase2": [
-        # Phase 2 also uses only core dependencies
-    ],
-    "phase3": [
-        "cellpose>=2.0.0",
-        "torch>=1.10.0",
-        "opencv-python>=4.5.0",
-    ],
-    "phase3-stardist": [
-        "stardist>=0.8.0",
-        "tensorflow>=2.8.0",
-    ],
-    "phase4": [
-        "cellpose>=2.0.0",
-        "torch>=1.10.0",
-        "opencv-python>=4.5.0",
-        "scipy>=1.7.0",
-    ],
-    "phase5": [
-        "cellpose>=2.0.0",
-        "torch>=1.10.0",
-        "opencv-python>=4.5.0",
-        "scipy>=1.7.0",
-        "pandas>=1.4.0",
-        "seaborn>=0.11.0",
-        "openpyxl>=3.0.0",
-        "xlsxwriter>=3.0.0",
-    ],
-    # Optional: GPU acceleration via CuPy (choose one matching your CUDA toolchain)
-    "cuda11": [
-        "cupy-cuda11x>=11.0.0",
-    ],
-    "cuda12": [
-        "cupy-cuda12x>=12.0.0",
-    ],
-    # Optional: Hugging Face Space client for remote Cellpose segmentation
-    "space": [
-        "gradio_client>=0.15.0",
-        # PyYAML is optional; used to read analysis/config.yaml for tokens
-        "PyYAML>=6.0",
-    ],
     "dev": [
         "pytest>=7.0.0",
         "pytest-cov>=3.0.0",
@@ -71,20 +46,6 @@ extras_require = {
         "jupyterlab>=3.3.0",
         "ipykernel>=6.0.0",
     ],
-    "all": [
-        "cellpose>=2.0.0",
-        "torch>=1.10.0",
-        "opencv-python>=4.5.0",
-        "scipy>=1.7.0",
-        "pandas>=1.4.0",
-        "seaborn>=0.11.0",
-        "openpyxl>=3.0.0",
-        "xlsxwriter>=3.0.0",
-        "stardist>=0.8.0",
-        "tensorflow>=2.8.0",
-        "gradio_client>=0.15.0",
-        "PyYAML>=6.0",
-    ],
 }
 
 setup(
@@ -92,7 +53,7 @@ setup(
     version="0.1.0",
     author="Gabriel Duarte",
     author_email="gabriel.duarte@osumc.edu",
-    description="A phased implementation module for confocal microscopy image analysis",
+    description="A comprehensive module for confocal microscopy image analysis with colocalization",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/TheSaezAtienzarLab/colok-roll",

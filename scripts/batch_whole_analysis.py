@@ -64,22 +64,22 @@ def norm01(a: np.ndarray) -> np.ndarray:
 def derive_channel_names_from_fluor_tags(channel_names: list[str]) -> list[str]:
     """
     Build a renamed channel list of the same length as input, mapping by substrings:
-      - contains 'af488' -> 'ALIX'
-      - contains 'af647' -> 'LAMP1'
-      - contains 'af568' -> 'Phalloidin'
-      - contains 'dapi'  -> 'DAPI'
+      - contains 'CH1' -> 'DAPI'
+      - contains 'CH2' -> 'ALIX'
+      - contains 'CH3' -> 'Phalloidin'
+      - contains 'CH4'  -> 'LAMP1'
     Unmatched channels retain their original name.
     """
     renamed: list[str] = []
     for nm in channel_names:
         low = str(nm).lower()
-        if "af488" in low:
+        if "ch2" in low:
             renamed.append("ALIX")
-        elif "af647" in low:
+        elif "ch4" in low:
             renamed.append("LAMP1")
-        elif "af568" in low:
+        elif "ch3" in low:
             renamed.append("Phalloidin")
-        elif "dapi" in low:
+        elif "ch1" in low:
             renamed.append("DAPI")
         else:
             renamed.append(nm)
@@ -87,7 +87,7 @@ def derive_channel_names_from_fluor_tags(channel_names: list[str]) -> list[str]:
 
 
 def ensure_required_channels_present(renamed: list[str]) -> None:
-    required = {"ALIX", "LAMP1", "Phalloidin", "DAPI"}
+    required = {"DAPI", "ALIX", "Phalloidin", "LAMP1"}
     present = set(renamed)
     missing = sorted(list(required - present))
     if missing:
@@ -204,16 +204,15 @@ def process_one_image(image_path: Path, out_root: Path) -> None:
 
     # Colocalization (ALIX vs LAMP1) using the background-corrected results
     mask_path = dst_mask
-    min_area = estimate_min_area_threshold(mask_path, fraction_of_median=0.30)
+    min_area = estimate_min_area_threshold(mask_path, fraction_of_median=0.70)
 
     res = compute_colocalization(
         image=results,  # dict[str, (array, meta)] EXACTLY as notebook usage
         mask=mask_path,
         channel_a="ALIX",
         channel_b="LAMP1",
-        normalization_scope="mask",
         thresholding='costes',
-        max_border_fraction=0.01,
+        max_border_fraction=0.10,
         min_area=int(min_area),
         border_margin_px=1,
         plot_mask=True,

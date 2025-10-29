@@ -1,4 +1,4 @@
-name: bioimage_analyzer
+name: colok-roll
 channels:
   - bioconda
   - conda-forge

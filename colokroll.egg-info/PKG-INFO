@@ -1,0 +1,205 @@
+Metadata-Version: 2.4
+Name: colokroll
+Version: 0.1.0
+Summary: A phased implementation module for confocal microscopy image analysis
+Home-page: https://github.com/TheSaezAtienzarLab/colok-roll
+Author: Gabriel Duarte
+Author-email: gabriel.duarte@osumc.edu
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Science/Research
+Classifier: Topic :: Scientific/Engineering :: Bio-Informatics
+Classifier: Topic :: Scientific/Engineering :: Image Processing
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: nd2reader>=3.3.0
+Requires-Dist: numpy>=1.20.0
+Requires-Dist: scikit-image>=0.19.0
+Requires-Dist: matplotlib>=3.5.0
+Requires-Dist: Pillow>=9.0.0
+Requires-Dist: tifffile>=2023.7.10
+Requires-Dist: imageio>=2.31.0
+Provides-Extra: phase1
+Provides-Extra: phase2
+Provides-Extra: phase3
+Requires-Dist: cellpose>=2.0.0; extra == "phase3"
+Requires-Dist: torch>=1.10.0; extra == "phase3"
+Requires-Dist: opencv-python>=4.5.0; extra == "phase3"
+Provides-Extra: phase3-stardist
+Requires-Dist: stardist>=0.8.0; extra == "phase3-stardist"
+Requires-Dist: tensorflow>=2.8.0; extra == "phase3-stardist"
+Provides-Extra: phase4
+Requires-Dist: cellpose>=2.0.0; extra == "phase4"
+Requires-Dist: torch>=1.10.0; extra == "phase4"
+Requires-Dist: opencv-python>=4.5.0; extra == "phase4"
+Requires-Dist: scipy>=1.7.0; extra == "phase4"
+Provides-Extra: phase5
+Requires-Dist: cellpose>=2.0.0; extra == "phase5"
+Requires-Dist: torch>=1.10.0; extra == "phase5"
+Requires-Dist: opencv-python>=4.5.0; extra == "phase5"
+Requires-Dist: scipy>=1.7.0; extra == "phase5"
+Requires-Dist: pandas>=1.4.0; extra == "phase5"
+Requires-Dist: seaborn>=0.11.0; extra == "phase5"
+Requires-Dist: openpyxl>=3.0.0; extra == "phase5"
+Requires-Dist: xlsxwriter>=3.0.0; extra == "phase5"
+Provides-Extra: cuda11
+Requires-Dist: cupy-cuda11x>=11.0.0; extra == "cuda11"
+Provides-Extra: cuda12
+Requires-Dist: cupy-cuda12x>=12.0.0; extra == "cuda12"
+Provides-Extra: space
+Requires-Dist: gradio_client>=0.15.0; extra == "space"
+Requires-Dist: PyYAML>=6.0; extra == "space"
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0.0; extra == "dev"
+Requires-Dist: pytest-cov>=3.0.0; extra == "dev"
+Requires-Dist: black>=22.0.0; extra == "dev"
+Requires-Dist: flake8>=4.0.0; extra == "dev"
+Requires-Dist: mypy>=0.950; extra == "dev"
+Requires-Dist: sphinx>=4.5.0; extra == "dev"
+Requires-Dist: jupyterlab>=3.3.0; extra == "dev"
+Requires-Dist: ipykernel>=6.0.0; extra == "dev"
+Provides-Extra: all
+Requires-Dist: cellpose>=2.0.0; extra == "all"
+Requires-Dist: torch>=1.10.0; extra == "all"
+Requires-Dist: opencv-python>=4.5.0; extra == "all"
+Requires-Dist: scipy>=1.7.0; extra == "all"
+Requires-Dist: pandas>=1.4.0; extra == "all"
+Requires-Dist: seaborn>=0.11.0; extra == "all"
+Requires-Dist: openpyxl>=3.0.0; extra == "all"
+Requires-Dist: xlsxwriter>=3.0.0; extra == "all"
+Requires-Dist: stardist>=0.8.0; extra == "all"
+Requires-Dist: tensorflow>=2.8.0; extra == "all"
+Requires-Dist: gradio_client>=0.15.0; extra == "all"
+Requires-Dist: PyYAML>=6.0; extra == "all"
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: provides-extra
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+# colok&roll
+
+A Python toolkit for perinuclear and colocalization analysis in confocal microscopy images. The library bundles image loading, preprocessing, segmentation, quantitative analysis, and visualization utilities so you can run the entire workflow with a single installation.
+
+## Features
+- Robust image ingestion with automatic conversion from ND2 and OIR into OME-TIFF while preserving metadata
+- Multi-channel 3D support, including maximum-intensity projections and per-channel utilities
+- CUDA-accelerated background subtraction with automatic CPU fallbacks for non-GPU paths
+- Cell and nuclei segmentation powered by Cellpose and Torch
+- Ring analysis, signal quantification, and colocalization helpers for downstream statistics
+- Ready-to-use visualization helpers for quick inspection of intermediate results
+
+## Installation
+### Standard install
+```bash
+pip install colokroll
+```
+Installing the package pulls every runtime dependency required for the full pipeline (segmentation, quantification, visualization, and statistics). No extra phase-specific flags are necessary.
+
+### Optional extras
+Use extras only when you need additional tooling:
+
+```bash
+# CUDA support (pick the variant that matches your driver/toolkit)
+pip install colokroll[cuda12]
+pip install colokroll[cuda11]
+
+# Run Cellpose via the Hugging Face Space client
+pip install colokroll[space]
+
+# Developer tooling (tests, formatting, docs)
+pip install colokroll[dev]
+```
+
+### From source
+```bash
+git clone https://github.com/TheSaezAtienzarLab/colok-roll.git
+cd colok-roll
+pip install -e .[dev]
+```
+
+## Quick start
+```python
+from colokroll import ImageLoader, CellSegmenter
+from colokroll.imaging_preprocessing.background_subtraction import BackgroundSubtractor
+from colokroll.visualization import plot_mip
+
+loader = ImageLoader()
+image = loader.load_image("path/to/sample.oir")  # automatically converts to OME-TIFF
+channel_names = loader.get_channel_names() or loader.rename_channels(["LAMP1", "Phalloidin", "ALIX", "DAPI"])
+
+# Optional preprocessing (requires CUDA if using BackgroundSubtractor)
+bg_subtractor = BackgroundSubtractor()
+processed = bg_subtractor.subtract_background(image[..., 0], channel_name=channel_names[0])[0]
+
+segmenter = CellSegmenter()
+result = segmenter.segment_from_file(
+    "path/to/sample.ome.tiff",
+    channel_names=channel_names,
+    channel_a="Phalloidin",
+    channel_b="DAPI",
+)
+
+plot_mip(image, channel_names=channel_names)
+```
+
+## Workflow overview
+1. Load ND2, OIR, or OME-TIFF files with automatic metadata extraction
+2. (Optional) Apply preprocessing modules: background subtraction, denoising, deconvolution
+3. Segment nuclei and cells, then build perinuclear rings
+4. Quantify channel intensities and compute colocalization statistics
+5. Visualize results or export tables for further analysis
+
+## Module layout
+```
+colokroll/
+├── core/                  # Configuration classes and shared utilities
+├── data_processing/       # Image loaders, format conversion, MIP creation
+├── imaging_preprocessing/ # Background subtraction and preprocessing helpers
+├── analysis/              # Segmentation, colocalization, quantification routines
+└── visualization/         # Visualization helpers
+```
+
+## Supported file formats
+- OME-TIFF (native processing format)
+- ND2 (Nikon) with conversion to OME-TIFF
+- OIR (Olympus) with conversion to OME-TIFF
+- Standard TIFF/PNG/JPG for masks and derived outputs
+
+## Runtime dependencies
+Installed alongside the package:
+- numpy, scikit-image, matplotlib, Pillow, tifffile, aicsimageio
+- nd2reader for Nikon pipelines
+- cellpose, torch, opencv-python for segmentation
+- scipy, pandas, seaborn, openpyxl, xlsxwriter for quantification and reporting
+- gradio_client and PyYAML when the `space` extra is requested
+
+## Contributing
+We welcome pull requests! Please open an issue to discuss large changes, follow the linting/test suite (`pytest`), and format code with `black` before submission.
+
+## Citation
+```bibtex
+@software{colokroll,
+  title={colok&roll: A Python Library for Confocal Microscopy Image Analysis},
+  author={Gabriel Duarte},
+  year={2024},
+  url={https://github.com/TheSaezAtienzarLab/colok-roll}
+}
+```
+
+## License
+Released under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+## Support
+- Issues: https://github.com/TheSaezAtienzarLab/colok-roll/issues
+- Email: gabriel.duarte@osumc.edu

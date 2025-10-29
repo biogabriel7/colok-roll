@@ -37,3 +37,11 @@ perinuclear_analysis.egg-info/
 *.err
 *.out
 sec.txt
+convert_oir_files/
+OIR_CONVERSION_GUIDE.md
+QUICKSTART_OIR.md
+README_OIR_CONVERSION.md
+run_oir_conversion_template.sh
+setup_oir_conversion.sh
+Untitled.ipynb
+.ipynb_checkpoints/Untitled-checkpoint.ipynb

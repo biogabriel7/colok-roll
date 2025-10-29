@@ -222,7 +222,6 @@ if PHASE_STATUS["phase4"] and RingAnalyzer is not None:
     __all__.extend([
         "RingAnalyzer",
     ])
-
 if PHASE_STATUS["phase5"]:
     phase5_exports = []
     if SignalQuantifier is not None:
