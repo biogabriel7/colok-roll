@@ -56,7 +56,7 @@ This guide assumes you have an active OSC account (request one at [osc.edu](http
 - Load Miniconda to access Conda tools:
     
     ```bash
-    module load miniconda3
+    module load miniconda3/24.1.2-py310
     conda activate
     ```
     
