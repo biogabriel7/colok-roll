@@ -1,0 +1,57 @@
+name: Build and Test Conda Package
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Miniconda
+      uses: conda-incubator/setup-miniconda@v3
+      with:
+        auto-update-conda: true
+        python-version: ${{ matrix.python-version }}
+        channels: conda-forge,defaults
+        channel-priority: strict
+    
+    - name: Install conda-build
+      shell: bash -l {0}
+      run: |
+        conda install -y conda-build anaconda-client
+    
+    - name: Build conda package
+      shell: bash -l {0}
+      run: |
+        # For local testing, temporarily use local source
+        sed -i.bak 's|url:.*|path: ..|' conda-recipe/meta.yaml
+        conda build conda-recipe/
+    
+    - name: Test installation
+      shell: bash -l {0}
+      run: |
+        conda create -n test-env python=${{ matrix.python-version }}
+        conda activate test-env
+        conda install --use-local colok-roll
+        python -c "import colokroll; print(f'Installed version: {colokroll.__version__}')"
+    
+    - name: Upload to Anaconda.org (on tag push)
+      if: startsWith(github.ref, 'refs/tags/v') && matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
+      shell: bash -l {0}
+      env:
+        ANACONDA_TOKEN: ${{ secrets.ANACONDA_TOKEN }}
+      run: |
+        anaconda -t $ANACONDA_TOKEN upload -u YOUR_USERNAME $(conda build conda-recipe/ --output) --force
+

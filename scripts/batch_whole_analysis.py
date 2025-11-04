@@ -212,10 +212,14 @@ def process_one_image(image_path: Path, out_root: Path) -> None:
         channel_a="ALIX",
         channel_b="LAMP1",
         thresholding='costes',
+        threshold_domain=args.threshold_domain,
+        manders_intensity_domain=args.manders_intensity_domain,
+        manders_z_window_halfwidth=args.manders_z_window_halfwidth,
+        mask_mode=args.mask_mode,
         max_border_fraction=0.10,
         min_area=int(min_area),
         border_margin_px=1,
-        plot_mask=True,
+        plot_mask=args.plot_mask,
     )
 
     # Save colocalization outputs (CSV per sample)
@@ -283,6 +287,34 @@ def main(argv: list[str] | None = None) -> int:
         help="Filename patterns to include (recursive glob)",
     )
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument(
+        "--threshold-domain",
+        default="raw",
+        choices=["raw", "normalized"],
+        help="Domain used to find thresholds (raw or normalized)",
+    )
+    parser.add_argument(
+        "--manders-intensity-domain",
+        default="raw",
+        choices=["raw", "normalized"],
+        help="Domain used to sum intensities for Manders (raw or normalized)",
+    )
+    parser.add_argument(
+        "--manders-z-window-halfwidth",
+        type=int,
+        default=None,
+        help="Halfwidth (in slices) around the middle Z used for Manders (None=all Z)",
+    )
+    parser.add_argument(
+        "--mask-mode",
+        default="best_slice",
+        choices=["best_slice", "broadcast", "3d"],
+        help="How to handle mask dimensionality (default reduces to best slice)",
+    )
+    grp = parser.add_mutually_exclusive_group()
+    grp.add_argument("--plot-mask", dest="plot_mask", action="store_true", help="Enable mask plot for labels")
+    grp.add_argument("--no-plot-mask", dest="plot_mask", action="store_false", help="Disable mask plot for speed")
+    parser.set_defaults(plot_mask=True)
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=getattr(logging, args.log_level), format="%(levelname)s: %(message)s")
@@ -303,7 +335,7 @@ def main(argv: list[str] | None = None) -> int:
     for idx, f in enumerate(files, 1):
         logging.info("=== [%d/%d] %s ===", idx, len(files), f.name)
         t0 = time.perf_counter()
-        process_one_image(f, out_root)
+        process_one_image(f, out_root, args)
         dt = time.perf_counter() - t0
         logging.info("Finished %s in %.1fs", f.name, dt)
 

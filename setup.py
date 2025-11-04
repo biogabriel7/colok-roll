@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
-# All dependencies included by default
+# All dependencies included for complete analysis pipeline
 install_requires = [
     # Image I/O and processing
     "nd2reader>=3.3.0",
@@ -13,35 +13,35 @@ install_requires = [
     "Pillow>=9.0.0",
     "tifffile>=2023.7.10",
     "imageio>=2.31.0",
-    # Cell segmentation
-    "cellpose>=2.0.0",
-    "torch>=1.10.0",
     "opencv-python>=4.5.0",
-    # Alternative segmentation backend
+    "opencv-rolling-ball>=1.0.1",
+    # Cell segmentation and deep learning
+    "cellpose>=2.0.0",
+    "torch>=2.0.0",
     "stardist>=0.8.0",
     "tensorflow>=2.8.0",
     # Analysis and statistics
     "scipy>=1.7.0",
     "pandas>=1.4.0",
     "seaborn>=0.11.0",
+    "scikit-learn>=1.0.0",
     # Excel export
     "openpyxl>=3.0.0",
     "xlsxwriter>=3.0.0",
-    # GPU acceleration (auto-detects CUDA version)
+    # GPU acceleration
     "cupy>=11.0.0",
     # Remote processing support
-    "gradio_client>=0.15.0",
+    "gradio_client>=1.0.0",
     "PyYAML>=6.0",
 ]
 
-# Development tools only (optional)
+# Development and testing tools (optional)
 extras_require = {
     "dev": [
         "pytest>=7.0.0",
         "pytest-cov>=3.0.0",
         "black>=22.0.0",
         "flake8>=4.0.0",
-        "mypy>=0.950",
         "sphinx>=4.5.0",
         "jupyterlab>=3.3.0",
         "ipykernel>=6.0.0",
