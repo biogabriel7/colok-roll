@@ -177,6 +177,16 @@ class ImageLoader:
                 image = np.take(image, indices=0, axis=t_axis)
                 axes = axes.replace('T', '')
             
+            # Handle unknown 'Q' axes by prompting user
+            if 'Q' in axes:
+                logger.warning(f"Unknown axes '{axes}' detected with shape {image.shape}")
+                axes = self._prompt_for_q_axes(axes, image.shape)
+                # Handle T if user specified it for a Q dimension
+                if 'T' in axes:
+                    t_axis = axes.index('T')
+                    image = np.take(image, indices=0, axis=t_axis)
+                    axes = axes.replace('T', '')
+            
             if axes == 'ZYXC':
                 pass  # already ZYXC
             elif axes == 'CZYX':
@@ -258,6 +268,41 @@ class ImageLoader:
         except Exception as e:
             logger.error(f"Failed to load TIFF file: {e}")
             raise ValueError(f"Error loading TIFF file: {e}")
+    
+    def _prompt_for_q_axes(self, axes: str, shape: tuple) -> str:
+        """Interactively ask user to identify Q dimensions.
+        
+        Args:
+            axes: Original axes string with Q characters (e.g., 'QQYX')
+            shape: Image shape tuple
+            
+        Returns:
+            Corrected axes string with Q replaced by Z/C/T (e.g., 'ZYXC')
+        """
+        print(f"\nUnknown axes '{axes}' detected with shape {shape}")
+        print("Please identify what each 'Q' dimension represents:\n")
+        
+        corrected_axes = list(axes)
+        q_positions = [i for i, ax in enumerate(axes) if ax == 'Q']
+        
+        for q_idx in q_positions:
+            dim_size = shape[q_idx]
+            while True:
+                print(f"Dimension {q_idx} (size {dim_size}):")
+                print("  Options: Z (z-slices), C (channels), T (timepoints)")
+                response = input(f"  Enter axis type [Z/C/T]: ").strip().upper()
+                
+                if response in ['Z', 'C', 'T']:
+                    corrected_axes[q_idx] = response
+                    logger.info(f"Mapped Q at position {q_idx} (size {dim_size}) to '{response}'")
+                    break
+                else:
+                    print(f"Invalid input '{response}'. Please enter Z, C, or T.\n")
+        
+        corrected_axes_str = ''.join(corrected_axes)
+        print(f"\n✓ Corrected axes: {axes} → {corrected_axes_str}\n")
+        
+        return corrected_axes_str
     
     def load_nd2(self, filepath: Union[str, Path]) -> np.ndarray:
         """Load an .nd2 file and extract metadata.
