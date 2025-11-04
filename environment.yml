@@ -30,6 +30,7 @@ dependencies:
   - flake8>=4.0
   - pyyaml>=6.0
   - requests>=2.20
+  - pip
   - pip:
       - stardist>=0.8.0
       - opencv-rolling-ball>=1.0.1
