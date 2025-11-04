@@ -1,0 +1,97 @@
+{% set name = "colok-roll" %}
+{% set version = "0.1.0" %}
+
+package:
+  name: {{ name|lower }}
+  version: {{ version }}
+
+source:
+  # For local testing, use:
+  # path: ..
+  
+  # For conda-forge submission, use GitHub release:
+  url: https://github.com/TheSaezAtienzarLab/colok-roll/archive/refs/tags/v{{ version }}.tar.gz
+  # To get SHA256: wget the tarball above, then run: sha256sum v0.1.0.tar.gz
+  # sha256: PUT_YOUR_SHA256_HERE
+
+build:
+  number: 0
+  noarch: python
+  script: {{ PYTHON }} -m pip install . -vv
+  entry_points:
+    - colokroll-analyze=colokroll.cli:main
+
+requirements:
+  host:
+    - python >=3.8
+    - pip
+    - setuptools
+  run:
+    - python >=3.8
+    # Image I/O and processing
+    - nd2reader >=3.3.0
+    - numpy >=1.20.0
+    - scikit-image >=0.19.0
+    - matplotlib >=3.5.0
+    - pillow >=9.0.0
+    - tifffile >=2023.7.10
+    - imageio >=2.31.0
+    - opencv >=4.5.0
+    # Deep learning
+    - pytorch >=2.0.0
+    - tensorflow >=2.8.0
+    # Analysis and statistics
+    - scipy >=1.7.0
+    - pandas >=1.4.0
+    - seaborn >=0.11.0
+    - scikit-learn >=1.0.0
+    # Excel export
+    - openpyxl >=3.0.0
+    # GPU acceleration
+    - cupy >=11.0.0
+    # Additional tools
+    - pyyaml >=6.0
+    # Pip-only dependencies
+    - pip
+  run_constrained:
+    # These are installed via pip in the environment
+    - cellpose >=2.0.0
+    - stardist >=0.8.0
+    - opencv-rolling-ball >=1.0.1
+    - xlsxwriter >=3.0.0
+    - gradio_client >=1.0.0
+
+test:
+  imports:
+    - colokroll
+    - colokroll.core
+    - colokroll.data_processing
+    - colokroll.imaging_preprocessing
+    - colokroll.analysis
+    - colokroll.visualization
+  commands:
+    - pip check
+  requires:
+    - pip
+
+about:
+  home: https://github.com/TheSaezAtienzarLab/colok-roll
+  license: MIT
+  license_file: LICENSE
+  summary: 'Comprehensive confocal microscopy image analysis with colocalization'
+  description: |
+    Colok-Roll is a unified package for analyzing confocal microscopy images
+    with advanced features including:
+    - Multi-format image loading (ND2, TIFF, OME-TIFF)
+    - GPU-accelerated background subtraction
+    - Cell and nuclei segmentation (Cellpose, StarDist)
+    - Colocalization analysis
+    - Signal quantification
+    - Perinuclear region analysis
+  doc_url: https://github.com/TheSaezAtienzarLab/colok-roll
+  dev_url: https://github.com/TheSaezAtienzarLab/colok-roll
+
+extra:
+  recipe-maintainers:
+    - duarte63
+

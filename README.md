@@ -11,33 +11,51 @@ A Python toolkit for perinuclear and colocalization analysis in confocal microsc
 - Ready-to-use visualization helpers for quick inspection of intermediate results
 
 ## Installation
-### Standard install
+
+### Conda Installation (Recommended)
+
+The easiest way to install `colok-roll` with all dependencies is using conda:
+
+```bash
+# Clone the repository
+git clone https://github.com/TheSaezAtienzarLab/colok-roll.git
+cd colok-roll
+
+# Create and activate the environment with all dependencies
+conda env create -f environment.yml
+conda activate colok-roll
+
+# Install the package
+pip install -e .
+```
+
+This single command installs **all dependencies** needed for the complete analysis pipeline:
+- Image processing and I/O (numpy, scipy, scikit-image, opencv)
+- Deep learning segmentation (PyTorch, TensorFlow, Cellpose, StarDist)
+- GPU acceleration (CuPy with CUDA support)
+- Data analysis and export (pandas, seaborn, openpyxl, xlsxwriter)
+- Visualization (matplotlib, Jupyter)
+
+See [CONDA_INSTALL.md](CONDA_INSTALL.md) for detailed installation instructions and troubleshooting.
+
+### Pip Installation
+
 ```bash
 pip install colokroll
 ```
-Installing the package pulls every runtime dependency required for the full pipeline (segmentation, quantification, visualization, and statistics). No extra phase-specific flags are necessary.
 
-### Optional extras
-Use extras only when you need additional tooling:
+Note: pip installation may require manual setup of CUDA and other system dependencies.
+
+### Developer Installation
+
+For development with testing and documentation tools:
 
 ```bash
-# CUDA support (pick the variant that matches your driver/toolkit)
-pip install colokroll[cuda12]
-pip install colokroll[cuda11]
-
-# Run Cellpose via the Hugging Face Space client
-pip install colokroll[space]
-
-# Developer tooling (tests, formatting, docs)
-pip install colokroll[dev]
+conda activate colok-roll
+pip install -e ".[dev]"
 ```
 
-### From source
-```bash
-git clone https://github.com/TheSaezAtienzarLab/colok-roll.git
-cd colok-roll
-pip install -e .[dev]
-```
+This includes: pytest, black, flake8, sphinx, and jupyterlab.
 
 ## Quick start
 ```python
@@ -89,11 +107,24 @@ colokroll/
 
 ## Runtime dependencies
 Installed alongside the package:
-- numpy, scikit-image, matplotlib, Pillow, tifffile, aicsimageio
+- numpy, scikit-image, matplotlib, Pillow, tifffile
 - nd2reader for Nikon pipelines
-- cellpose, torch, opencv-python for segmentation
+- cellpose, stardist, pytorch, tensorflow for segmentation
+- cupy for GPU acceleration
 - scipy, pandas, seaborn, openpyxl, xlsxwriter for quantification and reporting
-- gradio_client and PyYAML when the `space` extra is requested
+- gradio_client and PyYAML for remote processing
+
+## Publishing
+
+To publish this package to conda-forge for public distribution:
+
+1. **Quick Start**: See [QUICK_PUBLISH_GUIDE.md](QUICK_PUBLISH_GUIDE.md)
+2. **Detailed Guide**: See [PUBLISHING.md](PUBLISHING.md)
+
+After publishing to conda-forge, users will be able to install with:
+```bash
+conda install -c conda-forge colok-roll
+```
 
 ## Contributing
 We welcome pull requests! Please open an issue to discuss large changes, follow the linting/test suite (`pytest`), and format code with `black` before submission.
