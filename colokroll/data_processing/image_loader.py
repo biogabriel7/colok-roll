@@ -280,24 +280,82 @@ class ImageLoader:
             Corrected axes string with Q replaced by Z/C/T (e.g., 'ZYXC')
         """
         print(f"\nUnknown axes '{axes}' detected with shape {shape}")
-        print("Please identify what each 'Q' dimension represents:\n")
         
         corrected_axes = list(axes)
         q_positions = [i for i, ax in enumerate(axes) if ax == 'Q']
         
+        # Find the two largest dimensions (these MUST be Y and X)
+        shape_with_idx = [(i, s) for i, s in enumerate(shape)]
+        sorted_by_size = sorted(shape_with_idx, key=lambda x: x[1], reverse=True)
+        largest_indices = [sorted_by_size[i][0] for i in range(min(2, len(sorted_by_size)))]
+        
+        # Validate existing Y/X labels - they should be in the largest dimensions
+        # If not, they're likely mislabeled
+        for i, ax in enumerate(axes):
+            if ax == 'Y' and i not in largest_indices and shape[i] < 100:
+                # Y is mislabeled (too small) - probably should be C or T
+                if shape[i] <= 10:
+                    corrected_axes[i] = 'C'
+                    logger.info(f"Corrected mislabeled Y at position {i} (size {shape[i]}) to C")
+                else:
+                    corrected_axes[i] = 'Q'  # Will prompt for it
+                    q_positions.append(i)
+            elif ax == 'X' and i not in largest_indices and shape[i] < 100:
+                # X is mislabeled (too small)
+                if shape[i] <= 10:
+                    corrected_axes[i] = 'C'
+                    logger.info(f"Corrected mislabeled X at position {i} (size {shape[i]}) to C")
+                else:
+                    corrected_axes[i] = 'Q'  # Will prompt for it
+                    q_positions.append(i)
+        
+        # Now assign Y/X to Q dimensions in largest positions
+        y_assigned = 'Y' in corrected_axes
+        x_assigned = 'X' in corrected_axes
+        
+        # Auto-detect spatial and channel dimensions
+        remaining_q = []
         for q_idx in q_positions:
             dim_size = shape[q_idx]
-            while True:
-                print(f"Dimension {q_idx} (size {dim_size}):")
-                print("  Options: Z (z-slices), C (channels), T (timepoints)")
-                response = input(f"  Enter axis type [Z/C/T]: ").strip().upper()
-                
-                if response in ['Z', 'C', 'T']:
-                    corrected_axes[q_idx] = response
-                    logger.info(f"Mapped Q at position {q_idx} (size {dim_size}) to '{response}'")
-                    break
+            
+            # Auto-detect based on size and position heuristics
+            if q_idx in largest_indices and dim_size > 100:
+                # One of the two largest dimensions - must be spatial
+                if not y_assigned:
+                    corrected_axes[q_idx] = 'Y'
+                    y_assigned = True
+                    logger.info(f"Auto-detected dimension {q_idx} (size {dim_size}) as Y (spatial)")
+                elif not x_assigned:
+                    corrected_axes[q_idx] = 'X'
+                    x_assigned = True
+                    logger.info(f"Auto-detected dimension {q_idx} (size {dim_size}) as X (spatial)")
                 else:
-                    print(f"Invalid input '{response}'. Please enter Z, C, or T.\n")
+                    logger.warning(f"Dimension {q_idx} (size {dim_size}) is spatial but Y/X already assigned")
+                    remaining_q.append(q_idx)
+            elif dim_size <= 10:
+                # Very small dimension - likely channels
+                corrected_axes[q_idx] = 'C'
+                logger.info(f"Auto-detected dimension {q_idx} (size {dim_size}) as C (channels)")
+            else:
+                # Medium-sized or ambiguous - needs prompting
+                remaining_q.append(q_idx)
+        
+        # Only prompt for remaining non-spatial Q dimensions
+        if remaining_q:
+            print("Please identify what each remaining 'Q' dimension represents:\n")
+            for q_idx in remaining_q:
+                dim_size = shape[q_idx]
+                while True:
+                    print(f"Dimension {q_idx} (size {dim_size}):")
+                    print("  Options: Z (z-slices), C (channels), T (timepoints)")
+                    response = input(f"  Enter axis type [Z/C/T]: ").strip().upper()
+                    
+                    if response in ['Z', 'C', 'T']:
+                        corrected_axes[q_idx] = response
+                        logger.info(f"Mapped Q at position {q_idx} (size {dim_size}) to '{response}'")
+                        break
+                    else:
+                        print(f"Invalid input '{response}'. Please enter Z, C, or T.\n")
         
         corrected_axes_str = ''.join(corrected_axes)
         print(f"\n✓ Corrected axes: {axes} → {corrected_axes_str}\n")
