@@ -1,4 +1,4 @@
-"""Unit tests for the focus detection module."""
+"""Unit tests for the Z-slice detection module."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from scipy import ndimage
 from colokroll.imaging_preprocessing import (
     aggregate_focus_scores,
     compute_focus_scores,
-    detect_oof_slices,
-    find_oof_slices,
+    detect_slices_to_keep,
+    select_z_slices,
 )
 
 
@@ -37,22 +37,25 @@ def _synthetic_stack(z: int = 8, y: int = 64, x: int = 64, c: int = 3) -> np.nda
     return stack
 
 
-def test_find_oof_slices_flags_blurred_planes() -> None:
+def test_select_z_slices_keeps_blurred_planes() -> None:
+    """Test that slices with low focus scores (blurred) are kept."""
     stack = _synthetic_stack()
-    result = find_oof_slices(
+    result = select_z_slices(
         stack,
         strategy="percentile",
         threshold=40,
         smooth=1,
     )
 
-    removed = np.where(result.mask_oof)[0]
+    # Blurred slices have low scores and should be KEPT
+    kept = result.indices_keep
     for idx in BLUR_SLICES:
-        assert idx in removed
+        assert idx in kept
 
     assert result.scores_zc.shape == (stack.shape[0], stack.shape[3])
-    assert result.mask_oof_zc.shape == result.scores_zc.shape
-    assert result.indices_in_focus.shape[0] < stack.shape[0]
+    assert result.mask_keep_zc.shape == result.scores_zc.shape
+    assert result.indices_keep.shape[0] < stack.shape[0]
+    assert result.indices_remove.shape[0] > 0
 
 
 def test_aggregate_focus_scores_variants() -> None:
@@ -78,14 +81,14 @@ def test_axes_argument_matches_default_path() -> None:
     stack = _synthetic_stack()
     permuted = np.transpose(stack, (3, 0, 1, 2))  # C, Z, Y, X
 
-    baseline = find_oof_slices(
+    baseline = select_z_slices(
         stack,
         strategy="percentile",
         threshold=40,
         smooth=1,
     )
 
-    permuted_result = find_oof_slices(
+    permuted_result = select_z_slices(
         permuted,
         axes="CZYX",
         strategy="percentile",
@@ -94,16 +97,19 @@ def test_axes_argument_matches_default_path() -> None:
     )
 
     assert np.allclose(permuted_result.scores_agg, baseline.scores_agg)
-    assert np.array_equal(permuted_result.mask_oof, baseline.mask_oof)
-    assert np.array_equal(permuted_result.indices_in_focus, baseline.indices_in_focus)
+    assert np.array_equal(permuted_result.mask_keep, baseline.mask_keep)
+    assert np.array_equal(permuted_result.indices_keep, baseline.indices_keep)
 
 
-def test_detect_oof_topk_keeps_requested_planes() -> None:
+def test_detect_slices_topk_keeps_lowest_scores() -> None:
+    """Test that topk strategy keeps the k slices with lowest scores."""
     scores = np.array([0.1, 0.5, 0.3, 0.9, 0.8], dtype=np.float32)
-    result = detect_oof_slices(scores, strategy="topk", keep_top=2)
+    result = detect_slices_to_keep(scores, strategy="topk", keep_top=2)
 
-    kept = result["indices_in_focus"]
-    assert np.array_equal(kept, np.array([3, 4]))
-    assert result["mask_oof"].sum() == scores.size - kept.size
+    # Should keep the 2 slices with LOWEST scores: indices 0 (0.1) and 2 (0.3)
+    kept = result["indices_keep"]
+    assert np.array_equal(kept, np.array([0, 2]))
+    assert result["mask_keep"].sum() == kept.size
+    assert result["indices_remove"].size == scores.size - kept.size
 
 

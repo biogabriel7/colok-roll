@@ -1,19 +1,19 @@
 """Imaging preprocessing utilities."""
 
-from .focus_detection import (
-    FocusDetectionResult,
+from .z_slice_detection import (
+    ZSliceSelectionResult,
     aggregate_focus_scores,
     compute_focus_scores,
-    detect_oof_slices,
-    find_oof_slices,
+    detect_slices_to_keep,
+    select_z_slices,
 )
 
 __all__ = [
-    "FocusDetectionResult",
+    "ZSliceSelectionResult",
     "aggregate_focus_scores",
     "compute_focus_scores",
-    "detect_oof_slices",
-    "find_oof_slices",
+    "detect_slices_to_keep",
+    "select_z_slices",
 ]
 
 

@@ -428,6 +428,18 @@ def _extract_channel_vectors(
     return a.astype(np.float32), b.astype(np.float32)
 
 
+def _extract_channel_vectors_single_z(
+    img: np.ndarray, ch_a: int, ch_b: int, roi_2d: np.ndarray, z_idx: int
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Extract channel vectors from a single Z-slice."""
+    # img: (Z,Y,X,C), roi_2d: (Y,X) bool or label==k selection, z_idx: specific Z-slice
+    a = img[z_idx, ..., ch_a][roi_2d]
+    b = img[z_idx, ..., ch_b][roi_2d]
+    if HAS_CUDA:
+        return a.astype(cp.float32), b.astype(cp.float32)  # type: ignore[return-value]
+    return a.astype(np.float32), b.astype(np.float32)
+
+
 def _filter_labels(
     mask_2d: np.ndarray,
     *,
@@ -589,20 +601,31 @@ def compute_colocalization(
         tuple(int(x) for x in mask_2d.shape),
         int(len(np.unique(mask_2d)) - (1 if np.any(mask_2d == 0) else 0)),
     )
+    logger.info(
+        "Manders coefficients (M1/M2) will be computed per-Z-slice with independent thresholds (thresholding=%s), then averaged across %d Z-slices",
+        thresholding,
+        img.shape[0],
+    )
 
     if mask_2d.shape != img.shape[1:3]:
         raise ValueError(f"Mask (H,W) {mask_2d.shape} must match image spatial size {img.shape[1:3]}")
 
     # Keep a copy of original mask for visualization
     mask_original = mask_2d.copy()
+    
+    # Automatically remove label 1 (background in most segmentation tools)
+    has_label_1 = np.any(mask_2d == 1)
+    if has_label_1:
+        mask_2d[mask_2d == 1] = 0
+        logger.info("Automatically removed label 1 (background) from mask")
 
     # Optional filtering BEFORE normalization/metrics
     filter_info: Dict[str, Any] = {
         "min_area": int(min_area),
         "max_border_fraction": None if max_border_fraction is None else float(max_border_fraction),
         "border_margin_px": int(border_margin_px),
-        "kept_labels": [int(l) for l in np.unique(mask_2d) if l != 0],
-        "removed_labels": [],
+        "kept_labels": [int(l) for l in np.unique(mask_2d) if l > 1],  # Exclude 0 (background) and 1 (already removed)
+        "removed_labels": [1] if has_label_1 else [],  # Label 1 is automatically removed as background
     }
     if min_area > 0 or max_border_fraction is not None:
         mask_2d, filter_info = _filter_labels(
@@ -611,6 +634,9 @@ def compute_colocalization(
             max_border_fraction=max_border_fraction,
             border_margin_px=border_margin_px,
         )
+        # Preserve label 1 in removed list (it was already removed before filtering)
+        if has_label_1 and 1 not in filter_info["removed_labels"]:
+            filter_info["removed_labels"].append(1)
     else:
         logger.info("No label filtering applied.")
 
@@ -673,9 +699,12 @@ def compute_colocalization(
                 "pearson_r": float("nan"),
                 "manders_m1": float("nan"),
                 "manders_m2": float("nan"),
+                "manders_m1_per_z": [],
+                "manders_m2_per_z": [],
                 "overlap_r": float("nan"),
                 "jaccard": float("nan"),
                 "n_voxels": 0.0,
+                "thresholds_per_z": [],
             }
 
         if a_mm is not None:
@@ -683,48 +712,82 @@ def compute_colocalization(
         else:
             a_norm, b_norm = a_raw, b_raw
 
+        # Pearson, overlap, and Jaccard computed on all Z-slices together
         r = _safe_corrcoef(a_norm, b_norm)
-        # Select domain for threshold discovery and Manders
-        if threshold_domain == "raw":
-            a_tsrc, b_tsrc = a_raw, b_raw
-        elif threshold_domain == "normalized":
-            a_tsrc, b_tsrc = a_norm, b_norm
-        else:
-            raise ValueError("threshold_domain must be one of {'raw','normalized'}")
-
-        # Determine thresholds for Manders
-        t_a: Optional[float]
-        t_b: Optional[float]
-        if thresholding == "none":
-            t_a = None
-            t_b = None
-        elif thresholding == "otsu":
-            t_a = _otsu_threshold_1d(a_tsrc)
-            t_b = _otsu_threshold_1d(b_tsrc)
-        elif thresholding == "costes":
-            ta_c, tb_c = _costes_thresholds(a_tsrc, b_tsrc)
-            t_a = ta_c
-            t_b = tb_c
-        elif thresholding == "fixed":
-            if not fixed_thresholds:
-                raise ValueError("fixed_thresholds must be provided when thresholding='fixed'")
-            t_a, t_b = float(fixed_thresholds[0]), float(fixed_thresholds[1])
-        else:
-            raise ValueError("thresholding must be one of {'none','otsu','costes','fixed'}")
-
-        m1, m2 = _manders_m1_m2(a_tsrc, b_tsrc, t_a=t_a, t_b=t_b)
         ov = _overlap_coefficient(a_norm, b_norm)
         jac = _jaccard_on_positive(a_norm, b_norm)
+
+        # Manders computed per Z-slice with independent thresholds, then averaged
+        num_z = img.shape[0]
+        m1_per_z = []
+        m2_per_z = []
+        thresholds_per_z = []
+        
+        for z_idx in range(num_z):
+            a_raw_z, b_raw_z = _extract_channel_vectors_single_z(img, ch_a, ch_b, roi_2d, z_idx)
+            
+            if a_raw_z.size == 0:
+                continue
+            
+            # Normalize if needed
+            if a_mm is not None:
+                a_norm_z, b_norm_z = _normalize(a_mm, b_mm, a_raw_z, b_raw_z)  # type: ignore[arg-type]
+            else:
+                a_norm_z, b_norm_z = a_raw_z, b_raw_z
+            
+            # Select domain for threshold discovery
+            if threshold_domain == "raw":
+                a_tsrc_z, b_tsrc_z = a_raw_z, b_raw_z
+            elif threshold_domain == "normalized":
+                a_tsrc_z, b_tsrc_z = a_norm_z, b_norm_z
+            else:
+                raise ValueError("threshold_domain must be one of {'raw','normalized'}")
+            
+            # Determine thresholds for this Z-slice
+            t_a_z: Optional[float]
+            t_b_z: Optional[float]
+            if thresholding == "none":
+                t_a_z = None
+                t_b_z = None
+            elif thresholding == "otsu":
+                t_a_z = _otsu_threshold_1d(a_tsrc_z)
+                t_b_z = _otsu_threshold_1d(b_tsrc_z)
+            elif thresholding == "costes":
+                ta_c, tb_c = _costes_thresholds(a_tsrc_z, b_tsrc_z)
+                t_a_z = ta_c
+                t_b_z = tb_c
+            elif thresholding == "fixed":
+                if not fixed_thresholds:
+                    raise ValueError("fixed_thresholds must be provided when thresholding='fixed'")
+                t_a_z, t_b_z = float(fixed_thresholds[0]), float(fixed_thresholds[1])
+            else:
+                raise ValueError("thresholding must be one of {'none','otsu','costes','fixed'}")
+            
+            # Compute Manders for this Z-slice
+            m1_z, m2_z = _manders_m1_m2(a_tsrc_z, b_tsrc_z, t_a=t_a_z, t_b=t_b_z)
+            m1_per_z.append(m1_z)
+            m2_per_z.append(m2_z)
+            thresholds_per_z.append({
+                "z": z_idx,
+                "t_a": None if t_a_z is None else float(t_a_z),
+                "t_b": None if t_b_z is None else float(t_b_z),
+            })
+        
+        # Average Manders across Z-slices
+        m1 = float(np.nanmean(m1_per_z)) if m1_per_z else float("nan")
+        m2 = float(np.nanmean(m2_per_z)) if m2_per_z else float("nan")
 
         return {
             "pearson_r": float(r),
             "manders_m1": float(m1),
             "manders_m2": float(m2),
+            "manders_m1_per_z": [float(x) for x in m1_per_z],
+            "manders_m2_per_z": [float(x) for x in m2_per_z],
             "overlap_r": float(ov),
             "jaccard": float(jac),
             # number of voxels used in this ROI (use channel vector length)
             "n_voxels": float(a_raw.size),
-            "thresholds": {"t_a": None if t_a is None else float(t_a), "t_b": None if t_b is None else float(t_b)},
+            "thresholds_per_z": thresholds_per_z,
         }
 
     # Per-label metrics (after filtering)

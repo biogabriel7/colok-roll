@@ -24,11 +24,11 @@ from .data_processing import ImageLoader, MIPCreator
 
 # Imaging preprocessing
 from .imaging_preprocessing import (
-    FocusDetectionResult,
+    ZSliceSelectionResult,
     aggregate_focus_scores,
     compute_focus_scores,
-    detect_oof_slices,
-    find_oof_slices,
+    detect_slices_to_keep,
+    select_z_slices,
 )
 
 # Visualization
@@ -59,11 +59,11 @@ __all__ = [
     "MIPCreator",
     
     # Imaging preprocessing
-    "FocusDetectionResult",
+    "ZSliceSelectionResult",
     "aggregate_focus_scores",
     "compute_focus_scores",
-    "detect_oof_slices",
-    "find_oof_slices",
+    "detect_slices_to_keep",
+    "select_z_slices",
     
     # Visualization
     "Visualizer",

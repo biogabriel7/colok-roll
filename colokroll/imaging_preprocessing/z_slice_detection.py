@@ -1,8 +1,11 @@
-"""Focus assessment for microscopy Z-stacks.
+"""Z-slice selection for microscopy stacks.
 
-This module provides lightweight, per-slice focus metrics to help exclude
-out-of-focus planes prior to downstream analysis. It is designed to work with
-`ImageLoader` outputs, which are shaped `(Z, Y, X, C)`.
+This module provides lightweight, per-slice focus metrics to identify which
+Z-slices to retain for downstream analysis. It computes focus scores per slice
+and applies configurable threshold-based selection strategies. Slices with
+scores below the threshold are typically retained, while those above are excluded.
+
+Designed to work with `ImageLoader` outputs, which are shaped `(Z, Y, X, C)`.
 """
 
 from __future__ import annotations
@@ -20,14 +23,15 @@ DetectionStrategy = Literal["relative", "percentile", "topk"]
 
 
 @dataclass(frozen=True)
-class FocusDetectionResult:
-    """Container for focus detection outputs."""
+class ZSliceSelectionResult:
+    """Container for Z-slice selection outputs."""
 
     scores_zc: np.ndarray
     scores_agg: np.ndarray
-    mask_oof: np.ndarray
-    indices_in_focus: np.ndarray
-    mask_oof_zc: np.ndarray
+    mask_keep: np.ndarray
+    indices_keep: np.ndarray
+    indices_remove: np.ndarray
+    mask_keep_zc: np.ndarray
     threshold_used: float
     smoothed_scores: np.ndarray
     strategy: DetectionStrategy
@@ -145,7 +149,7 @@ def aggregate_focus_scores(
     raise ValueError(f"Unknown aggregation method: {aggregation}")
 
 
-def detect_oof_slices(
+def detect_slices_to_keep(
     scores: np.ndarray,
     *,
     strategy: DetectionStrategy = "relative",
@@ -153,7 +157,34 @@ def detect_oof_slices(
     smooth: int = 3,
     keep_top: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Determine which slices are out-of-focus based on their scores."""
+    """Determine which slices to keep for analysis based on their scores.
+    
+    Slices with scores below the threshold are typically kept for downstream
+    analysis, while those above are excluded.
+
+    Parameters
+    ----------
+    scores:
+        1-D array of per-slice focus scores.
+    strategy:
+        Detection strategy. ``"relative"`` computes threshold as a fraction of
+        the median score; ``"percentile"`` uses a percentile cutoff; ``"topk"``
+        keeps the bottom-k slices.
+    threshold:
+        Threshold value. For ``"relative"``, this is a multiplier of the median
+        score. For ``"percentile"``, this is a percentile value in [0, 100].
+        Ignored for ``"topk"``.
+    smooth:
+        Window size for smoothing scores before detection. Must be odd.
+    keep_top:
+        Number of slices to keep. Only used when ``strategy="topk"``.
+
+    Returns
+    -------
+    dict:
+        Dictionary with keys: ``"scores"``, ``"smoothed_scores"``, ``"mask_keep"``,
+        ``"indices_keep"``, ``"indices_remove"``, ``"threshold_used"``, ``"strategy"``.
+    """
 
     scores = np.asarray(scores, dtype=np.float32)
     if scores.ndim != 1:
@@ -174,35 +205,41 @@ def detect_oof_slices(
         if keep_top is None or keep_top <= 0:
             raise ValueError("keep_top must be a positive integer for topk strategy")
         keep_top = min(keep_top, smoothed.shape[0])
-        sort_idx = np.argsort(smoothed)[::-1]
-        in_focus_idx = np.sort(sort_idx[:keep_top])
-        mask_oof = np.ones_like(smoothed, dtype=bool)
-        mask_oof[in_focus_idx] = False
+        # Find bottom-k slices (lowest scores)
+        sort_idx = np.argsort(smoothed)
+        indices_keep = np.sort(sort_idx[:keep_top])
+        indices_remove = np.sort(sort_idx[keep_top:])
+        mask_keep = np.zeros_like(smoothed, dtype=bool)
+        mask_keep[indices_keep] = True
         return {
             "scores": scores,
             "smoothed_scores": smoothed,
-            "mask_oof": mask_oof,
-            "indices_in_focus": in_focus_idx,
-            "threshold_used": float(np.min(smoothed[in_focus_idx])),
+            "mask_keep": mask_keep,
+            "indices_keep": indices_keep,
+            "indices_remove": indices_remove,
+            "threshold_used": float(np.max(smoothed[indices_keep])),
             "strategy": strategy,
         }
     else:
         raise ValueError(f"Unknown strategy: {strategy}")
 
-    mask_oof = smoothed < threshold_value
-    indices_in_focus = np.nonzero(~mask_oof)[0]
+    # Slices below threshold are kept
+    mask_keep = smoothed < threshold_value
+    indices_keep = np.nonzero(mask_keep)[0]
+    indices_remove = np.nonzero(~mask_keep)[0]
 
     return {
         "scores": scores,
         "smoothed_scores": smoothed,
-        "mask_oof": mask_oof,
-        "indices_in_focus": indices_in_focus,
+        "mask_keep": mask_keep,
+        "indices_keep": indices_keep,
+        "indices_remove": indices_remove,
         "threshold_used": threshold_value,
         "strategy": strategy,
     }
 
 
-def find_oof_slices(
+def select_z_slices(
     img: np.ndarray,
     *,
     axes: Optional[str] = None,
@@ -215,8 +252,46 @@ def find_oof_slices(
     normalize: bool = True,
     clip_percent: float = 0.0,
     weights: Optional[Iterable[float]] = None,
-) -> FocusDetectionResult:
-    """End-to-end helper: compute focus, aggregate, and classify slices."""
+) -> ZSliceSelectionResult:
+    """End-to-end helper: compute focus scores, aggregate, and select slices.
+    
+    This function computes focus scores for each Z-slice, aggregates them across
+    channels, and applies a threshold-based selection strategy to determine which
+    slices to keep for downstream analysis.
+
+    Parameters
+    ----------
+    img:
+        Input stack. Expected shape `(Z, Y, X, C)`.
+    axes:
+        Optional axis order string (e.g. ``"CZYX"``).
+    method:
+        Focus metric to use. Options: ``"laplacian"``, ``"tenengrad"``, ``"fft"``,
+        or ``"combined"`` (default).
+    aggregation:
+        How to aggregate per-channel scores. Options: ``"median"`` (default),
+        ``"mean"``, ``"max"``, ``"min"``, or ``"weighted"``.
+    strategy:
+        Detection strategy. Options: ``"relative"`` (default), ``"percentile"``,
+        or ``"topk"``.
+    threshold:
+        Threshold value. Interpretation depends on ``strategy``.
+    smooth:
+        Window size for smoothing scores before detection.
+    keep_top:
+        Number of slices to keep. Only used when ``strategy="topk"``.
+    normalize:
+        If ``True``, each slice is normalized before scoring.
+    clip_percent:
+        Percentile clipping applied before normalization.
+    weights:
+        Channel weights for ``aggregation="weighted"``.
+
+    Returns
+    -------
+    ZSliceSelectionResult:
+        Result object containing scores, masks, indices, and metadata.
+    """
 
     scores_zc, scores_median = compute_focus_scores(
         img,
@@ -232,7 +307,7 @@ def find_oof_slices(
         else aggregate_focus_scores(scores_zc, aggregation=aggregation, weights=weights)
     )
 
-    detection = detect_oof_slices(
+    detection = detect_slices_to_keep(
         scores_agg,
         strategy=strategy,
         threshold=threshold,
@@ -240,23 +315,24 @@ def find_oof_slices(
         keep_top=keep_top,
     )
 
-    mask_oof_zc = np.empty_like(scores_zc, dtype=bool)
+    mask_keep_zc = np.empty_like(scores_zc, dtype=bool)
     for channel in range(scores_zc.shape[1]):
-        channel_detection = detect_oof_slices(
+        channel_detection = detect_slices_to_keep(
             scores_zc[:, channel],
             strategy=strategy,
             threshold=threshold,
             smooth=smooth,
             keep_top=keep_top,
         )
-        mask_oof_zc[:, channel] = channel_detection["mask_oof"]
+        mask_keep_zc[:, channel] = channel_detection["mask_keep"]
 
-    return FocusDetectionResult(
+    return ZSliceSelectionResult(
         scores_zc=scores_zc,
         scores_agg=scores_agg,
-        mask_oof=detection["mask_oof"],
-        indices_in_focus=detection["indices_in_focus"],
-        mask_oof_zc=mask_oof_zc,
+        mask_keep=detection["mask_keep"],
+        indices_keep=detection["indices_keep"],
+        indices_remove=detection["indices_remove"],
+        mask_keep_zc=mask_keep_zc,
         threshold_used=float(detection["threshold_used"]),
         smoothed_scores=detection["smoothed_scores"],
         strategy=strategy,
@@ -419,5 +495,4 @@ def _zscore(arr: np.ndarray) -> np.ndarray:
     std = arr.std(axis=0, keepdims=True)
     std_safe = np.where(std < 1e-6, 1.0, std)
     return ((arr - mean) / std_safe).astype(np.float32)
-
 
