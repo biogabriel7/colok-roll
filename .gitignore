@@ -60,10 +60,12 @@ plot_per_z_distributions.py
 .gitignore
 .gitignore
 manders_per_z_distributions_combined.png
-.gitignore
+.gitignore  
 .gitignore
 .gitignore
 manders_m1_histograms_by_cell.png
 manders_m2_histograms_by_cell.png
 per_cell_metrics.csv
 per_cell_per_z_metrics.csv
+check_ometiff_metadata.py
+METADATA_FIX_SUMMARY.md

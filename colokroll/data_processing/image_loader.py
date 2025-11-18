@@ -147,6 +147,9 @@ class ImageLoader:
     def load_tiff_with_metadata(self, filepath: Union[str, Path]) -> np.ndarray:
         """Load a TIFF file with associated metadata.
         
+        Metadata is extracted directly from the OME-XML embedded in the TIFF file.
+        JSON metadata files are only for user reference and validation.
+        
         Args:
             filepath: Path to the TIFF file.
             
@@ -155,14 +158,15 @@ class ImageLoader:
         """
         filepath = Path(filepath)
         
-        # Load metadata
-        metadata = self.converter.load_metadata(filepath)
-        if metadata:
-            self.metadata = metadata
-            self.pixel_size_um = metadata.get('pixel_size_um')
-            self.channels = metadata.get('channel_names', [])
-            
-            logger.info(f"Loaded metadata from converted TIFF: pixel_size={self.pixel_size_um}μm")
+        # Always extract metadata directly from OME-XML in TIFF file
+        try:
+            self._extract_ome_tiff_metadata(filepath)
+            if self.pixel_size_um:
+                logger.info(f"Extracted metadata from OME-XML: pixel_size={self.pixel_size_um}μm, channels={len(self.channels)}")
+            else:
+                logger.warning(f"No pixel size found in OME-XML metadata")
+        except Exception as e:
+            logger.warning(f"Could not extract OME-XML metadata: {e}")
         
         # Load image data (OME-aware axes handling)
         try:
@@ -498,6 +502,96 @@ class ImageLoader:
         self.metadata['z_levels'] = len(metadata.get('z_levels', [1]))
         self.metadata['timepoints'] = reader.metadata.get('total_images_per_channel', 1)
     
+    def _extract_ome_tiff_metadata(self, filepath: Path) -> None:
+        """Extract metadata from OME-TIFF file's embedded OME-XML.
+        
+        Args:
+            filepath: Path to the OME-TIFF file.
+        """
+        import xml.etree.ElementTree as ET
+        
+        with tifffile.TiffFile(str(filepath)) as tif:
+            # Try to find OME-XML
+            ome_xml = None
+            if hasattr(tif, 'ome_metadata') and tif.ome_metadata:
+                ome_xml = tif.ome_metadata
+            elif hasattr(tif, 'pages') and len(tif.pages) > 0:
+                page = tif.pages[0]
+                if hasattr(page, 'description') and page.description:
+                    desc = page.description
+                    if '<?xml' in desc or 'OME' in desc:
+                        ome_xml = desc
+            
+            if not ome_xml:
+                logger.warning("No OME-XML metadata found in TIFF file")
+                return
+            
+            # Parse OME-XML
+            try:
+                root = ET.fromstring(ome_xml)
+                
+                # Try multiple namespace versions
+                for ns_year in ['2016-06', '2015-01', '2013-06', '2012-06', '2011-06', '2010-06']:
+                    namespaces = {'ome': f'http://www.openmicroscopy.org/Schemas/OME/{ns_year}'}
+                    
+                    # Extract pixel sizes
+                    pixels = root.find('.//ome:Pixels', namespaces)
+                    if pixels is not None:
+                        px = pixels.get('PhysicalSizeX')
+                        py = pixels.get('PhysicalSizeY')
+                        pz = pixels.get('PhysicalSizeZ')
+                        
+                        # Use X pixel size (assuming square pixels, which is typical)
+                        if px:
+                            self.pixel_size_um = float(px)
+                            self.metadata['pixel_size_x'] = float(px)
+                        if py:
+                            self.metadata['pixel_size_y'] = float(py)
+                        if pz:
+                            self.metadata['pixel_size_z'] = float(pz)
+                        
+                        # Store pixel size units
+                        self.metadata['pixel_size_unit'] = pixels.get('PhysicalSizeXUnit', 'µm')
+                        
+                        # Get dimensions
+                        self.metadata['size_x'] = int(pixels.get('SizeX', 0))
+                        self.metadata['size_y'] = int(pixels.get('SizeY', 0))
+                        self.metadata['size_z'] = int(pixels.get('SizeZ', 1))
+                        self.metadata['size_c'] = int(pixels.get('SizeC', 1))
+                        self.metadata['size_t'] = int(pixels.get('SizeT', 1))
+                    
+                    # Extract channel information
+                    channels = root.findall('.//ome:Channel', namespaces)
+                    if channels:
+                        self.channels = []
+                        for i, ch in enumerate(channels):
+                            ch_name = ch.get('Name', f'Channel_{i}')
+                            self.channels.append(ch_name)
+                            
+                            # Store additional channel info in metadata
+                            ch_key = f'channel_{i}'
+                            self.metadata[ch_key] = {
+                                'name': ch_name,
+                                'id': ch.get('ID', ''),
+                            }
+                            
+                            em_wave = ch.get('EmissionWavelength')
+                            ex_wave = ch.get('ExcitationWavelength')
+                            if em_wave:
+                                self.metadata[ch_key]['emission_wavelength'] = float(em_wave)
+                            if ex_wave:
+                                self.metadata[ch_key]['excitation_wavelength'] = float(ex_wave)
+                        
+                        # Found channels, break out of namespace loop
+                        break
+                
+                # Store the full OME-XML for reference
+                self.metadata['ome_xml'] = ome_xml
+                
+            except Exception as e:
+                logger.warning(f"Failed to parse OME-XML: {e}")
+                raise
+    
     def load_tif_mask(self, filepath: Union[str, Path]) -> np.ndarray:
         """Load a .tif mask file.
         
@@ -644,19 +738,21 @@ class ImageLoader:
         
         logger.info(f"Mask contains {len(unique_values)} unique values")
     
-    def get_pixel_size(self) -> float:
+    def get_pixel_size(self) -> Optional[float]:
         """Get the pixel size in micrometers.
         
         Returns:
-            float: Pixel size in micrometers.
+            Optional[float]: Pixel size in micrometers, or None if not available.
             
-        Raises:
-            ValueError: If no pixel size is available.
+        Warnings:
+            UserWarning: If no pixel size is available in the metadata.
         """
         if self.pixel_size_um is None:
-            raise ValueError(
-                "No pixel size available. Image metadata must contain calibration information."
+            warnings.warn(
+                "No pixel size available. Image metadata must contain calibration information.",
+                UserWarning
             )
+            return None
         return self.pixel_size_um
     
     def get_metadata(self) -> Dict[str, Any]:

@@ -312,7 +312,11 @@ def _otsu_threshold_1d(values: np.ndarray, *, bins: int = 256) -> float:
         t = float((bin_edges[idx] + bin_edges[idx + 1]) * 0.5)
         return t
 
-    vals = np.asarray(values)
+    # CPU path: explicitly convert CuPy arrays to NumPy if needed
+    if HAS_CUDA and isinstance(values, cp.ndarray):
+        vals = np.asarray(values.get())  # Explicit GPU->CPU transfer
+    else:
+        vals = np.asarray(values)
     vals = vals[np.isfinite(vals)]
     if vals.size == 0:
         return float("nan")
@@ -336,7 +340,9 @@ def _otsu_threshold_1d(values: np.ndarray, *, bins: int = 256) -> float:
 def _linear_regression_slope_intercept(x: np.ndarray, y: np.ndarray) -> Tuple[float, float]:
     mod = xp
     if x.size == 0 or y.size == 0:
-        return 0.0, float(np.nanmean(np.asarray(y)) if y.size else 0.0)
+        # Safe conversion: handle CuPy arrays explicitly
+        y_cpu = y.get() if (HAS_CUDA and isinstance(y, cp.ndarray)) else y
+        return 0.0, float(np.nanmean(np.asarray(y_cpu)) if y.size else 0.0)
     x = mod.asarray(x)
     y = mod.asarray(y)
     x_mean = float(mod.mean(x))

@@ -1,3 +1,4 @@
+LICENSE
 README.md
 setup.py
 colokroll/__init__.py
@@ -19,5 +20,13 @@ colokroll/core/utils.py
 colokroll/data_processing/__init__.py
 colokroll/data_processing/image_loader.py
 colokroll/data_processing/mip_creator.py
+colokroll/imaging_preprocessing/__init__.py
+colokroll/imaging_preprocessing/z_slice_detection.py
+colokroll/imaging_preprocessing/background_subtraction/__init__.py
+colokroll/imaging_preprocessing/background_subtraction/auto_bg_config.py
+colokroll/imaging_preprocessing/background_subtraction/background_subtractor.py
+colokroll/imaging_preprocessing/background_subtraction/cuda_config.py
+colokroll/imaging_preprocessing/background_subtraction/utils.py
 colokroll/visualization/__init__.py
 colokroll/visualization/visualization.py
+tests/test_focus_detection.py

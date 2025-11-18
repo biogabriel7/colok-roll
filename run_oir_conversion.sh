@@ -22,7 +22,7 @@
 # ============================================================================
 
 # Input directory containing .oir files (override with command line argument)
-INPUT_DIR="${1:-/fs/scratch/PAS2598/duarte63/ALIX_confocal_data/Madi/Oct_12}"
+INPUT_DIR="${1:-/fs/scratch/PAS2598/duarte63/ALIX_confocal_data/Madi/Oct_28}"
 
 # Script location
 SCRIPT_DIR="/users/PAS2598/duarte63/GitHub/colok-roll"

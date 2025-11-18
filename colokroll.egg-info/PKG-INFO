@@ -1,7 +1,7 @@
 Metadata-Version: 2.4
 Name: colokroll
 Version: 0.1.0
-Summary: A phased implementation module for confocal microscopy image analysis
+Summary: A comprehensive module for confocal microscopy image analysis with colocalization
 Home-page: https://github.com/TheSaezAtienzarLab/colok-roll
 Author: Gabriel Duarte
 Author-email: gabriel.duarte@osumc.edu
@@ -17,6 +17,7 @@ Classifier: Programming Language :: Python :: 3.10
 Classifier: Programming Language :: Python :: 3.11
 Requires-Python: >=3.8
 Description-Content-Type: text/markdown
+License-File: LICENSE
 Requires-Dist: nd2reader>=3.3.0
 Requires-Dist: numpy>=1.20.0
 Requires-Dist: scikit-image>=0.19.0
@@ -24,64 +25,36 @@ Requires-Dist: matplotlib>=3.5.0
 Requires-Dist: Pillow>=9.0.0
 Requires-Dist: tifffile>=2023.7.10
 Requires-Dist: imageio>=2.31.0
-Provides-Extra: phase1
-Provides-Extra: phase2
-Provides-Extra: phase3
-Requires-Dist: cellpose>=2.0.0; extra == "phase3"
-Requires-Dist: torch>=1.10.0; extra == "phase3"
-Requires-Dist: opencv-python>=4.5.0; extra == "phase3"
-Provides-Extra: phase3-stardist
-Requires-Dist: stardist>=0.8.0; extra == "phase3-stardist"
-Requires-Dist: tensorflow>=2.8.0; extra == "phase3-stardist"
-Provides-Extra: phase4
-Requires-Dist: cellpose>=2.0.0; extra == "phase4"
-Requires-Dist: torch>=1.10.0; extra == "phase4"
-Requires-Dist: opencv-python>=4.5.0; extra == "phase4"
-Requires-Dist: scipy>=1.7.0; extra == "phase4"
-Provides-Extra: phase5
-Requires-Dist: cellpose>=2.0.0; extra == "phase5"
-Requires-Dist: torch>=1.10.0; extra == "phase5"
-Requires-Dist: opencv-python>=4.5.0; extra == "phase5"
-Requires-Dist: scipy>=1.7.0; extra == "phase5"
-Requires-Dist: pandas>=1.4.0; extra == "phase5"
-Requires-Dist: seaborn>=0.11.0; extra == "phase5"
-Requires-Dist: openpyxl>=3.0.0; extra == "phase5"
-Requires-Dist: xlsxwriter>=3.0.0; extra == "phase5"
-Provides-Extra: cuda11
-Requires-Dist: cupy-cuda11x>=11.0.0; extra == "cuda11"
-Provides-Extra: cuda12
-Requires-Dist: cupy-cuda12x>=12.0.0; extra == "cuda12"
-Provides-Extra: space
-Requires-Dist: gradio_client>=0.15.0; extra == "space"
-Requires-Dist: PyYAML>=6.0; extra == "space"
+Requires-Dist: opencv-python>=4.5.0
+Requires-Dist: opencv-rolling-ball>=1.0.1
+Requires-Dist: cellpose>=2.0.0
+Requires-Dist: torch>=2.0.0
+Requires-Dist: stardist>=0.8.0
+Requires-Dist: tensorflow>=2.8.0
+Requires-Dist: scipy>=1.7.0
+Requires-Dist: pandas>=1.4.0
+Requires-Dist: seaborn>=0.11.0
+Requires-Dist: scikit-learn>=1.0.0
+Requires-Dist: openpyxl>=3.0.0
+Requires-Dist: xlsxwriter>=3.0.0
+Requires-Dist: cupy>=11.0.0
+Requires-Dist: gradio_client>=1.0.0
+Requires-Dist: PyYAML>=6.0
 Provides-Extra: dev
 Requires-Dist: pytest>=7.0.0; extra == "dev"
 Requires-Dist: pytest-cov>=3.0.0; extra == "dev"
 Requires-Dist: black>=22.0.0; extra == "dev"
 Requires-Dist: flake8>=4.0.0; extra == "dev"
-Requires-Dist: mypy>=0.950; extra == "dev"
 Requires-Dist: sphinx>=4.5.0; extra == "dev"
 Requires-Dist: jupyterlab>=3.3.0; extra == "dev"
 Requires-Dist: ipykernel>=6.0.0; extra == "dev"
-Provides-Extra: all
-Requires-Dist: cellpose>=2.0.0; extra == "all"
-Requires-Dist: torch>=1.10.0; extra == "all"
-Requires-Dist: opencv-python>=4.5.0; extra == "all"
-Requires-Dist: scipy>=1.7.0; extra == "all"
-Requires-Dist: pandas>=1.4.0; extra == "all"
-Requires-Dist: seaborn>=0.11.0; extra == "all"
-Requires-Dist: openpyxl>=3.0.0; extra == "all"
-Requires-Dist: xlsxwriter>=3.0.0; extra == "all"
-Requires-Dist: stardist>=0.8.0; extra == "all"
-Requires-Dist: tensorflow>=2.8.0; extra == "all"
-Requires-Dist: gradio_client>=0.15.0; extra == "all"
-Requires-Dist: PyYAML>=6.0; extra == "all"
 Dynamic: author
 Dynamic: author-email
 Dynamic: classifier
 Dynamic: description
 Dynamic: description-content-type
 Dynamic: home-page
+Dynamic: license-file
 Dynamic: provides-extra
 Dynamic: requires-dist
 Dynamic: requires-python
@@ -100,33 +73,51 @@ A Python toolkit for perinuclear and colocalization analysis in confocal microsc
 - Ready-to-use visualization helpers for quick inspection of intermediate results
 
 ## Installation
-### Standard install
+
+### Conda Installation (Recommended)
+
+The easiest way to install `colok-roll` with all dependencies is using conda:
+
+```bash
+# Clone the repository
+git clone https://github.com/TheSaezAtienzarLab/colok-roll.git
+cd colok-roll
+
+# Create and activate the environment with all dependencies
+conda env create -f environment.yml
+conda activate colok-roll
+
+# Install the package
+pip install -e .
+```
+
+This single command installs **all dependencies** needed for the complete analysis pipeline:
+- Image processing and I/O (numpy, scipy, scikit-image, opencv)
+- Deep learning segmentation (PyTorch, TensorFlow, Cellpose, StarDist)
+- GPU acceleration (CuPy with CUDA support)
+- Data analysis and export (pandas, seaborn, openpyxl, xlsxwriter)
+- Visualization (matplotlib, Jupyter)
+
+See [CONDA_INSTALL.md](CONDA_INSTALL.md) for detailed installation instructions and troubleshooting.
+
+### Pip Installation
+
 ```bash
 pip install colokroll
 ```
-Installing the package pulls every runtime dependency required for the full pipeline (segmentation, quantification, visualization, and statistics). No extra phase-specific flags are necessary.
 
-### Optional extras
-Use extras only when you need additional tooling:
+Note: pip installation may require manual setup of CUDA and other system dependencies.
+
+### Developer Installation
+
+For development with testing and documentation tools:
 
 ```bash
-# CUDA support (pick the variant that matches your driver/toolkit)
-pip install colokroll[cuda12]
-pip install colokroll[cuda11]
-
-# Run Cellpose via the Hugging Face Space client
-pip install colokroll[space]
-
-# Developer tooling (tests, formatting, docs)
-pip install colokroll[dev]
+conda activate colok-roll
+pip install -e ".[dev]"
 ```
 
-### From source
-```bash
-git clone https://github.com/TheSaezAtienzarLab/colok-roll.git
-cd colok-roll
-pip install -e .[dev]
-```
+This includes: pytest, black, flake8, sphinx, and jupyterlab.
 
 ## Quick start
 ```python
@@ -178,11 +169,24 @@ colokroll/
 
 ## Runtime dependencies
 Installed alongside the package:
-- numpy, scikit-image, matplotlib, Pillow, tifffile, aicsimageio
+- numpy, scikit-image, matplotlib, Pillow, tifffile
 - nd2reader for Nikon pipelines
-- cellpose, torch, opencv-python for segmentation
+- cellpose, stardist, pytorch, tensorflow for segmentation
+- cupy for GPU acceleration
 - scipy, pandas, seaborn, openpyxl, xlsxwriter for quantification and reporting
-- gradio_client and PyYAML when the `space` extra is requested
+- gradio_client and PyYAML for remote processing
+
+## Publishing
+
+To publish this package to conda-forge for public distribution:
+
+1. **Quick Start**: See [QUICK_PUBLISH_GUIDE.md](QUICK_PUBLISH_GUIDE.md)
+2. **Detailed Guide**: See [PUBLISHING.md](PUBLISHING.md)
+
+After publishing to conda-forge, users will be able to install with:
+```bash
+conda install -c conda-forge colok-roll
+```
 
 ## Contributing
 We welcome pull requests! Please open an issue to discuss large changes, follow the linting/test suite (`pytest`), and format code with `black` before submission.
