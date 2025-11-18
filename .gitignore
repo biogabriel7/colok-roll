@@ -1,7 +1,4 @@
-# Local segmentation config (contains secrets)
-perinuclear_analysis/analysis/config.yaml
-.perinuclear_analysis/
-.config/perinuclear_analysis/config.yaml
+# Local segmentation config
 colokroll/analysis/config.yaml
 data/
 manual_coloc.xlsx
@@ -37,7 +34,6 @@ perinuclear_analysis.egg-info/
 *.err
 *.out
 sec.txt
-convert_oir_files/
 OIR_CONVERSION_GUIDE.md
 QUICKSTART_OIR.md
 README_OIR_CONVERSION.md
@@ -69,3 +65,6 @@ per_cell_metrics.csv
 per_cell_per_z_metrics.csv
 check_ometiff_metadata.py
 METADATA_FIX_SUMMARY.md
+.ipynb_checkpoints/
+colokroll.egg-info/
+colokroll/analysis/config.yaml
