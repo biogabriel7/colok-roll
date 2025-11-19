@@ -92,10 +92,10 @@ plot_mip(image, channel_names=channel_names)
 ## Module layout
 ```
 colokroll/
-├── core/                  # Configuration classes and shared utilities
-├── data_processing/       # Image loaders, format conversion, MIP creation
-├── imaging_preprocessing/ # Background subtraction and preprocessing helpers
-├── analysis/              # Segmentation, colocalization, quantification routines
+├── core/                  # Configuration, format conversion, and shared utilities
+├── data_processing/       # Image loaders and MIP creation
+├── imaging_preprocessing/ # Background subtraction and Z-slice detection
+├── analysis/              # Segmentation, colocalization, and quantification
 └── visualization/         # Visualization helpers
 ```
 

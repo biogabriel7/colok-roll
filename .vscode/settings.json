@@ -1,5 +1,0 @@
-{
-    "python.analysis.autoImportCompletions": true,
-    "wolf.disableHotModeWarning": true,
-    "cursorpyright.analysis.autoImportCompletions": true
-}

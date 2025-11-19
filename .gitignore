@@ -1,11 +1,19 @@
 # Local segmentation config
 colokroll/analysis/config.yaml
-data/
 manual_coloc.xlsx
 
+# Data files
+data/
+*.tif
+*.tiff
+*.ome.tif
+*.ome.tiff
+*.nd2
+*.oir
+*.json # Metadata files from conversions
 
-python files
-*pycache*
+# Python bytecode and related files
+__pycache__/
 *.pyc
 *.pyo
 *.pyd
@@ -16,55 +24,14 @@ python files
 *.pywzw
 *.pyzwzw
 
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
 
+# Specific files to ignore
 CLAUDE.MD
-cellpose_api.md
-
-data/
-*.tif
-*.tiff
-*.ome.tif
-*.ome.tiff
-*.nd2
-*.oir
-*.json  # Metadata files from conversions
-
-perinuclear_analysis.egg-info/
-
+colokroll.egg-info/
 *.err
 *.out
-sec.txt
-OIR_CONVERSION_GUIDE.md
-QUICKSTART_OIR.md
-README_OIR_CONVERSION.md
-run_oir_conversion_template.sh
-setup_oir_conversion.sh
-Untitled.ipynb
-.ipynb_checkpoints/Untitled-checkpoint.ipynb
-CONDA_INSTALL.md
-PRE_PUBLISH_CHECKLIST.md
-PUBLISHING.md
-QUICK_PUBLISH_GUIDE.md
-creating_figures_poster.ipynb
-creating_images_poster.ipynb
-.ipynb_checkpoints/creating_figures_poster-checkpoint.ipynb
-.gitignore
+
+# Specific files in specific directories
 tests/test_focus_detection.py
-.ipynb_checkpoints/creating_images_poster-checkpoint.ipynb
-test_blurring.ipynb
-plot_per_z_distributions.py
-.gitignore
-.gitignore
-manders_per_z_distributions_combined.png
-.gitignore  
-.gitignore
-.gitignore
-manders_m1_histograms_by_cell.png
-manders_m2_histograms_by_cell.png
-per_cell_metrics.csv
-per_cell_per_z_metrics.csv
-check_ometiff_metadata.py
-METADATA_FIX_SUMMARY.md
-.ipynb_checkpoints/
-colokroll.egg-info/
-colokroll/analysis/config.yaml
