@@ -266,6 +266,22 @@ class ImageLoader:
                 raise ValueError(f"Expected 4D ZYXC after reordering, got shape {image.shape} (axes {axes})")
             
             self._validate_image_dimensions(image)
+            
+            # Reconcile channel names with actual image dimensions
+            num_channels = image.shape[3]
+            if len(self.channels) != num_channels:
+                logger.warning(
+                    f"Channel count mismatch: Metadata has {len(self.channels)}, "
+                    f"Image has {num_channels}. Adjusting channel list."
+                )
+                if len(self.channels) < num_channels:
+                    # Add missing channels
+                    for i in range(len(self.channels), num_channels):
+                        self.channels.append(f"Channel_{i}")
+                else:
+                    # Truncate extra channels
+                    self.channels = self.channels[:num_channels]
+            
             logger.info(f"Successfully loaded TIFF image with shape: {image.shape}")
             return image
             
@@ -583,6 +599,14 @@ class ImageLoader:
                                 self.metadata[ch_key]['excitation_wavelength'] = float(ex_wave)
                         
                         # Found channels, break out of namespace loop
+                        
+                        # Ensure we have enough channel names if SizeC > found channels
+                        size_c = self.metadata.get('size_c', 0)
+                        if len(self.channels) < size_c:
+                            logger.info(f"Found {len(self.channels)} Channel elements but SizeC is {size_c}. Adding default names.")
+                            for i in range(len(self.channels), size_c):
+                                self.channels.append(f"Channel_{i}")
+                                
                         break
                 
                 # Store the full OME-XML for reference
