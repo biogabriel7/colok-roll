@@ -28,7 +28,7 @@ from .utils import (
     create_channel_color_mapping,
     get_colormap_from_fluorophore,
 )
-from .format_converter import FormatConverter
+from .format_converter import FormatConverter, STANDARD_AXES, EXPECTED_NDIM
 
 __all__ = [
     # Configuration classes
@@ -63,4 +63,6 @@ __all__ = [
     
     # Format converter
     "FormatConverter",
+    "STANDARD_AXES",
+    "EXPECTED_NDIM",
 ]

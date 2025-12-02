@@ -1,0 +1,90 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "colokroll"
+version = "0.1.0"
+description = "Colocalization analysis toolkit for microscopy images"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10,<3.14"
+authors = [
+    { name = "SaezAtienzar Lab" }
+]
+keywords = ["microscopy", "colocalization", "image-analysis", "fluorescence"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Image Processing",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+
+dependencies = [
+    "numpy>=1.20",
+    "scipy>=1.7",
+    "pandas>=1.4",
+    "scikit-image>=0.19",
+    "opencv-python>=4.5",
+    "pillow>=9.0",
+    "tifffile>=2023.7",
+    "imageio>=2.11.0",
+    "nd2reader>=3.3",
+    "matplotlib>=3.5",
+    "seaborn>=0.11",
+    "openpyxl>=3.0",
+    "pyyaml>=6.0",
+    "xlsxwriter>=3.0.0",
+    "opencv-rolling-ball>=1.0.1",
+    # For OIR and other proprietary format support
+    "bioio>=1.0.0",
+    "bioio-ome-tiff>=1.0.0",
+    "bioio-bioformats>=1.0.0",  # Requires Java JRE for OIR files
+]
+
+[project.optional-dependencies]
+# Deep learning dependencies (heavy, install separately)
+ml = [
+    "torch>=2.0",
+    "torchvision",
+    "stardist>=0.8.0",
+]
+# GPU acceleration
+gpu = [
+    "cupy>=13.0",
+]
+# Full installation with all optional dependencies
+full = [
+    "colokroll[ml,gpu]",
+]
+# Development dependencies
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=3.0",
+    "black>=22.0",
+    "flake8>=4.0",
+    "jupyterlab>=3.0",
+    "ipykernel>=6.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/SaezAtienzar/colok-roll"
+Repository = "https://github.com/SaezAtienzar/colok-roll"
+
+[tool.hatch.build.targets.wheel]
+packages = ["colokroll"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+

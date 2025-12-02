@@ -1,6 +1,12 @@
 """
 Format converter for microscopy image files.
 Supports converting proprietary formats (e.g., .nd2, .oir) to OME-TIFF while preserving metadata.
+
+All output images are standardized to 4D arrays with ZYXC axis order:
+- Z: Z-slices (depth)
+- Y: Height
+- X: Width  
+- C: Channels
 """
 
 import os
@@ -15,9 +21,16 @@ import nd2reader
 
 logger = logging.getLogger(__name__)
 
+# Standard axis order for all output images
+STANDARD_AXES = 'ZYXC'
+EXPECTED_NDIM = 4
+
 
 class FormatConverter:
-    """Convert microscopy image formats while preserving metadata."""
+    """Convert microscopy image formats while preserving metadata.
+    
+    All output images are standardized to 4D arrays with ZYXC axis order.
+    """
     
     def __init__(self, preserve_original: bool = True):
         """Initialize the format converter.
@@ -27,6 +40,240 @@ class FormatConverter:
         """
         self.preserve_original = preserve_original
         self.metadata_cache: Dict[str, Dict[str, Any]] = {}
+    
+    def _ensure_4d_zyxc(self, data: np.ndarray, source_axes: str = None) -> np.ndarray:
+        """Ensure data is 4D with ZYXC axis order.
+        
+        Args:
+            data: Input array of any dimensionality.
+            source_axes: Optional string indicating source axis order (e.g., 'YX', 'ZYX', 'CZYX').
+            
+        Returns:
+            4D array with shape (Z, Y, X, C).
+            
+        Raises:
+            ValueError: If data cannot be converted to 4D ZYXC format.
+        """
+        original_shape = data.shape
+        original_ndim = data.ndim
+        
+        logger.info(f"Standardizing array: shape={original_shape}, source_axes={source_axes}")
+        
+        # Handle based on current dimensionality
+        if data.ndim == 2:
+            # YX -> ZYXC (add Z and C dimensions)
+            data = data[np.newaxis, :, :, np.newaxis]
+            logger.info(f"Expanded 2D (YX) to 4D (ZYXC): {original_shape} -> {data.shape}")
+            
+        elif data.ndim == 3:
+            # Could be ZYX or YXC - need to determine based on source_axes or heuristics
+            if source_axes:
+                if source_axes.upper() == 'ZYX':
+                    # ZYX -> ZYXC (add C dimension)
+                    data = data[..., np.newaxis]
+                elif source_axes.upper() == 'YXC':
+                    # YXC -> ZYXC (add Z dimension)
+                    data = data[np.newaxis, ...]
+                elif source_axes.upper() == 'CYX':
+                    # CYX -> ZYXC (transpose and add Z)
+                    data = np.transpose(data, (1, 2, 0))  # CYX -> YXC
+                    data = data[np.newaxis, ...]  # YXC -> ZYXC
+                else:
+                    # Default: assume ZYX, add C
+                    data = data[..., np.newaxis]
+            else:
+                # Heuristic: if last dim is small (<=10), assume it's channels (YXC)
+                if data.shape[-1] <= 10 and data.shape[-1] < data.shape[0] and data.shape[-1] < data.shape[1]:
+                    # Likely YXC -> ZYXC
+                    data = data[np.newaxis, ...]
+                else:
+                    # Assume ZYX -> ZYXC
+                    data = data[..., np.newaxis]
+            logger.info(f"Expanded 3D to 4D (ZYXC): {original_shape} -> {data.shape}")
+            
+        elif data.ndim == 4:
+            # Already 4D, but may need reordering
+            if source_axes and source_axes.upper() != 'ZYXC':
+                # Reorder axes to ZYXC
+                source_upper = source_axes.upper()
+                if source_upper == 'CZYX':
+                    data = np.transpose(data, (1, 2, 3, 0))  # CZYX -> ZYXC
+                elif source_upper == 'ZCYX':
+                    data = np.transpose(data, (0, 2, 3, 1))  # ZCYX -> ZYXC
+                elif source_upper == 'YXZC':
+                    data = np.transpose(data, (2, 0, 1, 3))  # YXZC -> ZYXC
+                elif source_upper == 'YXCZ':
+                    data = np.transpose(data, (3, 0, 1, 2))  # YXCZ -> ZYXC
+                elif source_upper == 'CXYZ':
+                    data = np.transpose(data, (3, 2, 1, 0))  # CXYZ -> ZYXC (reverse + channel last)
+                elif source_upper == 'XYZC':
+                    data = np.transpose(data, (2, 1, 0, 3))  # XYZC -> ZYXC
+                else:
+                    logger.warning(f"Unknown 4D axis order: {source_axes}, assuming ZYXC")
+                logger.info(f"Reordered 4D from {source_axes} to ZYXC: {original_shape} -> {data.shape}")
+            else:
+                logger.info(f"Data already 4D ZYXC: {data.shape}")
+                
+        elif data.ndim == 5:
+            # TCZYX, TZCYX, etc. - handle time dimension
+            logger.warning(f"5D data detected: shape={original_shape}, axes={source_axes}")
+            
+            if source_axes:
+                source_upper = source_axes.upper()
+                # Find time dimension and remove it (take first timepoint)
+                if 'T' in source_upper:
+                    t_idx = source_upper.index('T')
+                    data = np.take(data, 0, axis=t_idx)
+                    # Remove T from axes string for recursive call
+                    remaining_axes = source_upper.replace('T', '')
+                    logger.info(f"Removed time dimension (axis {t_idx}), taking first timepoint")
+                    return self._ensure_4d_zyxc(data, source_axes=remaining_axes)
+                else:
+                    # No T, just take first slice of first dimension
+                    logger.warning("5D data without T axis, taking first slice of dim 0")
+                    data = data[0]
+                    remaining_axes = source_upper[1:] if len(source_upper) > 1 else None
+                    return self._ensure_4d_zyxc(data, source_axes=remaining_axes)
+            else:
+                # No source_axes provided, assume first axis is T
+                logger.warning(f"5D data detected without axis info, taking first timepoint: {original_shape}")
+                data = data[0]
+                return self._ensure_4d_zyxc(data, source_axes=None)
+            
+        else:
+            raise ValueError(
+                f"Cannot convert {data.ndim}D array to 4D ZYXC format. "
+                f"Input shape: {original_shape}. Expected 2D, 3D, 4D, or 5D input."
+            )
+        
+        # Final validation
+        if data.ndim != 4:
+            raise ValueError(
+                f"Failed to convert to 4D ZYXC. "
+                f"Input: {original_ndim}D {original_shape}, Output: {data.ndim}D {data.shape}"
+            )
+        
+        return data
+    
+    def _validate_4d_zyxc(self, data: np.ndarray) -> None:
+        """Validate that data is 4D with reasonable ZYXC dimensions.
+        
+        Args:
+            data: Array to validate.
+            
+        Raises:
+            ValueError: If data is not valid 4D ZYXC format.
+        """
+        if data.ndim != EXPECTED_NDIM:
+            raise ValueError(
+                f"Image must be 4D (ZYXC format). Got {data.ndim}D with shape {data.shape}. "
+                f"Expected dimensions: Z (depth), Y (height), X (width), C (channels)."
+            )
+        
+        z, y, x, c = data.shape
+        
+        # Sanity checks
+        if z < 1:
+            raise ValueError(f"Invalid Z dimension: {z}. Must have at least 1 Z-slice.")
+        if y < 1 or x < 1:
+            raise ValueError(f"Invalid spatial dimensions: Y={y}, X={x}. Must be positive.")
+        if c < 1:
+            raise ValueError(f"Invalid channel count: {c}. Must have at least 1 channel.")
+        if c > 20:
+            logger.warning(f"Unusually high channel count: {c}. Verify axis order is correct.")
+        
+        logger.info(f"Validated 4D ZYXC array: Z={z}, Y={y}, X={x}, C={c}")
+    
+    def _validate_colocalization_requirements(
+        self, 
+        data: np.ndarray, 
+        metadata: Dict[str, Any],
+        strict: bool = False
+    ) -> Dict[str, Any]:
+        """Validate that converted data meets requirements for colocalization analysis.
+        
+        Checks critical requirements for valid colocalization metrics (PCC, MCC):
+        - Bit-depth preservation (no lossy compression or downsampling)
+        - Spatial calibration (pixel size) for Costes randomization test
+        - Z-stack integrity (not flattened)
+        
+        Args:
+            data: Image array to validate.
+            metadata: Associated metadata dictionary.
+            strict: If True, raises errors instead of warnings for missing calibration.
+            
+        Returns:
+            Dictionary with validation results and warnings.
+            
+        Raises:
+            ValueError: If strict=True and critical metadata is missing.
+        """
+        validation = {
+            'bit_depth_ok': True,
+            'calibration_ok': True,
+            'z_stack_ok': True,
+            'warnings': [],
+            'dtype': str(data.dtype),
+            'shape': data.shape,
+        }
+        
+        # Check bit-depth (should be uint16 or higher for microscopy)
+        logger.info(f"Data dtype: {data.dtype}, shape: {data.shape}")
+        
+        if data.dtype == np.uint8:
+            msg = (
+                "WARNING: Image is 8-bit. Most microscopy acquisitions are 12-16 bit. "
+                "8-bit data may indicate lossy downsampling which compromises "
+                "colocalization metrics (PCC, MCC). Verify this matches original data."
+            )
+            logger.warning(msg)
+            validation['warnings'].append(msg)
+        
+        # Check spatial calibration (critical for Costes randomization test)
+        pixel_size = metadata.get('pixel_size_um')
+        voxel_z = metadata.get('pixel_info', {}).get('voxel_size_z')
+        
+        if pixel_size is None or pixel_size == 0:
+            msg = (
+                "CRITICAL: Missing pixel size (PhysicalSizeX/Y). "
+                "This is required for accurate Costes significance testing. "
+                "Colocalization statistics may be unreliable without proper calibration."
+            )
+            validation['calibration_ok'] = False
+            validation['warnings'].append(msg)
+            if strict:
+                raise ValueError(msg)
+            logger.warning(msg)
+        else:
+            logger.info(f"Pixel size: {pixel_size} µm")
+            validation['pixel_size_um'] = pixel_size
+        
+        if voxel_z is None or voxel_z == 0:
+            msg = (
+                "WARNING: Missing Z-spacing (PhysicalSizeZ). "
+                "3D colocalization analysis requires Z calibration for accurate results."
+            )
+            validation['warnings'].append(msg)
+            logger.warning(msg)
+        else:
+            logger.info(f"Z-spacing: {voxel_z} µm")
+            validation['voxel_size_z'] = voxel_z
+        
+        # Check Z-stack integrity
+        z_levels = data.shape[0]
+        if z_levels == 1:
+            msg = (
+                "NOTE: Single Z-slice detected. For accurate colocalization, "
+                "3D volumetric data (Z-stacks) is preferred over 2D images to avoid "
+                "false-positive colocalization from depth projection artifacts."
+            )
+            validation['warnings'].append(msg)
+            logger.info(msg)
+        else:
+            logger.info(f"Z-stack integrity preserved: {z_levels} slices")
+            validation['z_stack_ok'] = True
+        
+        return validation
     
     def nd2_to_ome_tiff(
         self, 
@@ -69,6 +316,28 @@ class FormatConverter:
                 metadata = self._extract_comprehensive_metadata(reader)
                 image_data = self._read_nd2_as_array(reader)
             
+            # Ensure 4D ZYXC format
+            image_data = self._ensure_4d_zyxc(image_data, source_axes='ZYXC')
+            self._validate_4d_zyxc(image_data)
+            
+            # Update metadata dimensions to match standardized array
+            z, y, x, c = image_data.shape
+            metadata['dimensions'] = {
+                'z_levels': z,
+                'height': y,
+                'width': x,
+                'channels': c,
+                'timepoints': 1,
+            }
+            metadata['axes'] = STANDARD_AXES
+            
+            # Validate colocalization requirements
+            validation = self._validate_colocalization_requirements(image_data, metadata)
+            metadata['conversion_validation'] = validation
+            
+            if validation['warnings']:
+                logger.warning(f"Conversion completed with {len(validation['warnings'])} warning(s)")
+            
             # Save as TIFF with metadata
             self._save_as_tiff(image_data, output_path, metadata)
             
@@ -94,7 +363,7 @@ class FormatConverter:
         output_path: Optional[Union[str, Path]] = None,
         save_metadata: bool = True,
     ) -> Tuple[Path, Dict[str, Any]]:
-        """Convert .oir (Olympus) files to .ome.tiff using bioformats2raw + raw2ometiff.
+        """Convert .oir (Olympus) files to .ome.tiff using bioio.
 
         Args:
             input_path: Path to the input .oir file.
@@ -105,13 +374,10 @@ class FormatConverter:
             Tuple of (output_path, metadata_dict).
 
         Raises:
-            FileNotFoundError: If the input file is missing or bioformats2raw/raw2ometiff not found.
+            FileNotFoundError: If the input file is missing.
+            ImportError: If bioio is not installed.
             ValueError: If conversion fails.
         """
-        import subprocess
-        import shutil
-        import tempfile
-        
         input_path = Path(input_path)
         if not input_path.exists():
             raise FileNotFoundError(f"Input file not found: {input_path}")
@@ -119,14 +385,14 @@ class FormatConverter:
         if input_path.suffix.lower() != ".oir":
             raise ValueError(f"Input file must be .oir format, got: {input_path.suffix}")
 
-        # Check if bioformats2raw and raw2ometiff are available
-        if not shutil.which("bioformats2raw"):
-            raise FileNotFoundError(
-                "bioformats2raw not found. Install with: conda install -c ome bioformats2raw"
-            )
-        if not shutil.which("raw2ometiff"):
-            raise FileNotFoundError(
-                "raw2ometiff not found. Install with: conda install -c ome raw2ometiff"
+        # Try to import bioio
+        try:
+            from bioio import BioImage
+        except ImportError:
+            raise ImportError(
+                "bioio not found. Install with: pip install bioio bioio-ome-tiff\n"
+                "For OIR support, also install: pip install bioio-bioformats\n"
+                "Note: bioio-bioformats requires Java Runtime Environment (JRE)."
             )
 
         if output_path is None:
@@ -134,123 +400,111 @@ class FormatConverter:
         else:
             output_path = Path(output_path)
 
-        logger.info(f"Converting {input_path} to {output_path} using bioformats2raw + raw2ometiff")
+        logger.info(f"Converting {input_path} to {output_path} using bioio")
 
-        # Create temporary directory for intermediate zarr format
-        with tempfile.TemporaryDirectory(prefix="oir_conv_") as temp_dir:
-            temp_zarr = Path(temp_dir) / "temp.zarr"
+        try:
+            # Read OIR file using bioio
+            logger.info("Reading OIR file with bioio...")
+            img = BioImage(input_path)
             
-            try:
-                # Step 1: Convert OIR to Zarr using bioformats2raw
-                logger.info(f"Step 1: Converting to Zarr format...")
-                cmd_bf2raw = [
-                    "bioformats2raw",
-                    str(input_path),
-                    str(temp_zarr)
-                ]
-                
-                result = subprocess.run(
-                    cmd_bf2raw,
-                    capture_output=True,
-                    text=True,
-                    check=True
-                )
-                logger.info(f"bioformats2raw completed successfully")
-                
-                # Step 2: Convert Zarr to OME-TIFF using raw2ometiff
-                logger.info(f"Step 2: Converting Zarr to OME-TIFF...")
-                cmd_raw2ome = [
-                    "raw2ometiff",
-                    str(temp_zarr),
-                    str(output_path)
-                ]
-                
-                result = subprocess.run(
-                    cmd_raw2ome,
-                    capture_output=True,
-                    text=True,
-                    check=True
-                )
-                logger.info(f"raw2ometiff completed successfully")
-                
-                # Load the converted file to extract metadata
-                with tifffile.TiffFile(str(output_path)) as tif:
-                    data = tif.series[0].asarray()
-                    axes = tif.series[0].axes
-                    
-                    # Extract OME-XML metadata if available
-                    ome_metadata = {}
-                    if hasattr(tif, 'ome_metadata') and tif.ome_metadata:
-                        # Parse OME-XML for detailed metadata
-                        try:
-                            import xml.etree.ElementTree as ET
-                            root = ET.fromstring(tif.ome_metadata)
-                            
-                            # Extract pixel sizes
-                            namespaces = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06'}
-                            pixels = root.find('.//ome:Pixels', namespaces)
-                            if pixels is not None:
-                                pixel_size_x = float(pixels.get('PhysicalSizeX', 0) or 0)
-                                pixel_size_y = float(pixels.get('PhysicalSizeY', 0) or 0)
-                                voxel_size_z = float(pixels.get('PhysicalSizeZ', 0) or 0)
-                                pixel_size_um = (pixel_size_x + pixel_size_y) / 2 if pixel_size_x and pixel_size_y else None
-                            else:
-                                pixel_size_x = pixel_size_y = voxel_size_z = pixel_size_um = None
-                            
-                            # Extract channel names
-                            channels = root.findall('.//ome:Channel', namespaces)
-                            channel_names = [ch.get('Name', f'Channel_{i}') for i, ch in enumerate(channels)]
-                            if not channel_names and data.ndim >= 4:
-                                channel_names = [f'Channel_{i}' for i in range(data.shape[-1])]
-                            
-                        except Exception as e:
-                            logger.warning(f"Could not parse OME-XML metadata: {e}")
-                            pixel_size_x = pixel_size_y = voxel_size_z = pixel_size_um = None
-                            channel_names = [f'Channel_{i}' for i in range(data.shape[-1] if data.ndim >= 4 else 1)]
-                    else:
-                        pixel_size_x = pixel_size_y = voxel_size_z = pixel_size_um = None
-                        channel_names = [f'Channel_{i}' for i in range(data.shape[-1] if data.ndim >= 4 else 1)]
-                
-                # Build metadata dictionary
-                metadata: Dict[str, Any] = {
-                    "original_format": "oir",
-                    "conversion_method": "bioformats2raw + raw2ometiff",
-                    "axes": axes,
-                    "channel_names": channel_names,
-                    "pixel_size_um": pixel_size_um,
-                    "pixel_info": {
-                        "pixel_microns": pixel_size_um,
-                        "pixel_microns_x": pixel_size_x,
-                        "pixel_microns_y": pixel_size_y,
-                        "voxel_size_z": voxel_size_z,
-                        "calibration": None,
-                    },
-                    "dimensions": {
-                        "width": data.shape[2] if data.ndim >= 3 else data.shape[1],
-                        "height": data.shape[1] if data.ndim >= 3 else data.shape[0],
-                        "z_levels": data.shape[0] if data.ndim >= 4 else (data.shape[0] if data.ndim == 3 and 'Z' in axes else 1),
-                        "channels": data.shape[-1] if data.ndim >= 4 else 1,
-                        "timepoints": 1,
-                    },
-                }
+            # Get image data - bioio returns data in TCZYX or similar order
+            data = img.data  # This is a dask or numpy array
+            if hasattr(data, 'compute'):
+                data = data.compute()  # Convert dask to numpy if needed
+            
+            source_axes = img.dims.order if hasattr(img.dims, 'order') else str(img.dims)
+            logger.info(f"OIR file loaded: shape={data.shape}, axes={source_axes}")
+            
+            # Extract metadata from bioio
+            pixel_size_x = None
+            pixel_size_y = None
+            voxel_size_z = None
+            pixel_size_um = None
+            channel_names = []
+            
+            # Get physical pixel sizes
+            if hasattr(img, 'physical_pixel_sizes'):
+                pps = img.physical_pixel_sizes
+                if pps.X is not None:
+                    pixel_size_x = pps.X
+                if pps.Y is not None:
+                    pixel_size_y = pps.Y
+                if pps.Z is not None:
+                    voxel_size_z = pps.Z
+                if pixel_size_x and pixel_size_y:
+                    pixel_size_um = (pixel_size_x + pixel_size_y) / 2
+            
+            # Get channel names
+            if hasattr(img, 'channel_names') and img.channel_names:
+                channel_names = list(img.channel_names)
+            
+            logger.info(f"Extracted pixel size: XY={pixel_size_um} µm, Z={voxel_size_z} µm")
+            logger.info(f"Channel names: {channel_names}")
+            
+            # Standardize to 4D ZYXC format
+            # bioio typically returns TCZYX, we need to handle this
+            data = self._ensure_4d_zyxc(data, source_axes=source_axes)
+            self._validate_4d_zyxc(data)
+            
+            z, y, x, c = data.shape
+            
+            # Update channel names if needed
+            if not channel_names or len(channel_names) != c:
+                channel_names = [f'Channel_{i}' for i in range(c)]
+            
+            # Build metadata dictionary with standardized dimensions
+            metadata: Dict[str, Any] = {
+                "original_format": "oir",
+                "conversion_method": "bioio",
+                "axes": STANDARD_AXES,
+                "channel_names": channel_names,
+                "pixel_size_um": pixel_size_um,
+                "pixel_info": {
+                    "pixel_microns": pixel_size_um,
+                    "pixel_microns_x": pixel_size_x,
+                    "pixel_microns_y": pixel_size_y,
+                    "voxel_size_z": voxel_size_z,
+                    "calibration": None,
+                },
+                "dimensions": {
+                    "z_levels": z,
+                    "height": y,
+                    "width": x,
+                    "channels": c,
+                    "timepoints": 1,
+                },
+            }
+            
+            # Validate colocalization requirements
+            validation = self._validate_colocalization_requirements(data, metadata)
+            metadata['conversion_validation'] = validation
+            
+            if validation['warnings']:
+                logger.warning(f"Conversion completed with {len(validation['warnings'])} warning(s)")
+            
+            # Save in standardized ZYXC format
+            logger.info(f"Saving in standardized ZYXC format: {data.shape}")
+            self._save_as_tiff(data, output_path, metadata)
 
-                if save_metadata:
-                    metadata_path = output_path.with_suffix(".json")
-                    self._save_metadata_json(metadata, metadata_path)
-                    logger.info(f"Metadata saved to {metadata_path}")
+            if save_metadata:
+                metadata_path = output_path.with_suffix(".json")
+                self._save_metadata_json(metadata, metadata_path)
+                logger.info(f"Metadata saved to {metadata_path}")
 
-                self.metadata_cache[str(output_path)] = metadata
-                logger.info(f"Successfully converted to {output_path}")
-                return output_path, metadata
+            self.metadata_cache[str(output_path)] = metadata
+            logger.info(f"Successfully converted to {output_path}")
+            return output_path, metadata
 
-            except subprocess.CalledProcessError as e:
-                logger.error(f"Conversion command failed: {e.cmd}")
-                logger.error(f"stdout: {e.stdout}")
-                logger.error(f"stderr: {e.stderr}")
-                raise ValueError(f"Conversion failed: {e.stderr}")
-            except Exception as e:
-                logger.error(f"Failed to convert {input_path}: {e}")
-                raise ValueError(f"Conversion failed: {e}")
+        except ImportError as e:
+            logger.error(f"Missing bioio plugin: {e}")
+            raise ImportError(
+                f"Failed to read OIR file. You may need additional bioio plugins:\n"
+                f"  pip install bioio-bioformats\n"
+                f"Original error: {e}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to convert {input_path}: {e}")
+            raise ValueError(f"Conversion failed: {e}")
     
     def _extract_comprehensive_metadata(self, reader: nd2reader.ND2Reader) -> Dict[str, Any]:
         """Extract comprehensive metadata from ND2 reader.
@@ -526,35 +780,36 @@ class FormatConverter:
         """Save image data as OME-TIFF with metadata.
         
         Args:
-            image_data: Image array to save.
+            image_data: 4D image array with ZYXC axis order.
             output_path: Output file path.
             metadata: Metadata dictionary to embed.
+            
+        Raises:
+            ValueError: If image_data is not 4D ZYXC format.
         """
-        # Prepare OME-TIFF metadata - match actual array shape
-        axes_mapping = {
-            4: 'ZYXC',  # Z-slices, Y, X, Channels (actual shape from nd2reader)
-            3: 'ZYX'    # Z-slices, Y, X (single channel)
-        }
-        axes = axes_mapping.get(image_data.ndim, 'YX')
+        # Validate input is 4D ZYXC
+        self._validate_4d_zyxc(image_data)
         
-        # Get channel names properly
+        z, y, x, c = image_data.shape
+        
+        # Get channel names
         channel_names = metadata.get('channel_names', [])
-        if not channel_names:
-            # Fallback to generic names
-            num_channels = image_data.shape[-1] if image_data.ndim > 3 else 1
-            channel_names = [f'Channel_{i}' for i in range(num_channels)]
+        if not channel_names or len(channel_names) != c:
+            channel_names = [f'Channel_{i}' for i in range(c)]
+            logger.warning(f"Channel names missing or mismatched, using defaults: {channel_names}")
         
+        # Build OME metadata
         ome_metadata = {
-            'axes': axes,
+            'axes': STANDARD_AXES,
         }
         
-        # Add channel information properly for OME-TIFF
-        if len(channel_names) > 1:
+        # Add channel information
+        if c > 1:
             ome_metadata['Channel'] = [{'Name': name} for name in channel_names]
-        elif len(channel_names) == 1:
+        else:
             ome_metadata['Channel'] = {'Name': channel_names[0]}
         
-        # Add pixel size information if available
+        # Add physical pixel sizes
         if metadata.get('pixel_size_um'):
             ome_metadata['PhysicalSizeX'] = metadata['pixel_size_um']
             ome_metadata['PhysicalSizeY'] = metadata['pixel_size_um']
@@ -566,26 +821,10 @@ class FormatConverter:
             ome_metadata['PhysicalSizeZ'] = metadata['pixel_info']['voxel_size_z']
             ome_metadata['PhysicalSizeZUnit'] = 'µm'
         
-        # Debug logging
-        logger.info(f"Saving image with shape: {image_data.shape}, axes: {axes}")
-        logger.info(f"OME metadata: {ome_metadata}")
+        logger.info(f"Saving 4D ZYXC image: shape={image_data.shape}, axes={STANDARD_AXES}")
+        logger.info(f"Dimensions: Z={z}, Y={y}, X={x}, C={c}")
         
-        # Save as OME-TIFF with explicit axes - this is critical for multichannel
         try:
-            logger.info(f"Attempting OME-TIFF with explicit axes and metadata")
-            
-            # Create proper OME metadata with explicit axes
-            ome_metadata = {
-                'axes': 'ZYXC'  # Be explicit about axes interpretation
-            }
-            
-            # Add physical pixel sizes
-            if metadata.get('pixel_size_um'):
-                ome_metadata['PhysicalSizeX'] = metadata['pixel_size_um']
-                ome_metadata['PhysicalSizeY'] = metadata['pixel_size_um'] 
-                ome_metadata['PhysicalSizeXUnit'] = 'µm'
-                ome_metadata['PhysicalSizeYUnit'] = 'µm'
-            
             tifffile.imwrite(
                 output_path,
                 image_data,
@@ -593,10 +832,10 @@ class FormatConverter:
                 metadata=ome_metadata,
                 compression='lzw'
             )
+            logger.info(f"Successfully saved OME-TIFF: {output_path}")
         except Exception as e:
-            logger.error(f"OME-TIFF save failed: {e}, trying without OME metadata")
+            logger.error(f"OME-TIFF save failed: {e}, trying fallback")
             # Fallback: save as regular TIFF with JSON description
-            # Use LZW compression for better ImageJ compatibility
             tifffile.imwrite(
                 output_path,
                 image_data,
@@ -613,6 +852,39 @@ class FormatConverter:
         """
         with open(output_path, 'w') as f:
             json.dump(metadata, f, indent=2, default=str)
+    
+    def load_image(self, tiff_path: Union[str, Path]) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """Load image data from a converted TIFF file.
+        
+        Args:
+            tiff_path: Path to the TIFF file.
+            
+        Returns:
+            Tuple of (image_data, metadata) where image_data is 4D ZYXC array.
+            
+        Raises:
+            FileNotFoundError: If file doesn't exist.
+            ValueError: If image is not in 4D ZYXC format.
+        """
+        tiff_path = Path(tiff_path)
+        if not tiff_path.exists():
+            raise FileNotFoundError(f"TIFF file not found: {tiff_path}")
+        
+        with tifffile.TiffFile(str(tiff_path)) as tif:
+            data = tif.series[0].asarray()
+            axes = tif.series[0].axes
+        
+        # Validate 4D ZYXC format
+        if data.ndim != EXPECTED_NDIM:
+            raise ValueError(
+                f"Image must be 4D ZYXC format. Got {data.ndim}D with shape {data.shape}, axes={axes}. "
+                f"Use the converter to standardize the image format first."
+            )
+        
+        self._validate_4d_zyxc(data)
+        metadata = self.load_metadata(tiff_path)
+        
+        return data, metadata
     
     def load_metadata(self, tiff_path: Union[str, Path]) -> Dict[str, Any]:
         """Load metadata from a converted TIFF file.
@@ -650,18 +922,25 @@ class FormatConverter:
         # Try to extract from OME-XML metadata (for OME-TIFF files)
         try:
             with tifffile.TiffFile(str(tiff_path)) as tif:
+                data = tif.series[0].asarray()
+                axes = tif.series[0].axes
+                
+                # Validate 4D ZYXC format
+                if data.ndim != EXPECTED_NDIM:
+                    logger.warning(
+                        f"TIFF file is not in expected 4D ZYXC format: "
+                        f"shape={data.shape}, axes={axes}"
+                    )
+                
+                pixel_size_x = pixel_size_y = voxel_size_z = pixel_size_um = None
+                channel_names = []
+                
                 if hasattr(tif, 'ome_metadata') and tif.ome_metadata:
                     import xml.etree.ElementTree as ET
                     root = ET.fromstring(tif.ome_metadata)
                     
-                    # Extract pixel sizes
                     namespaces = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06'}
                     pixels = root.find('.//ome:Pixels', namespaces)
-                    
-                    pixel_size_x = None
-                    pixel_size_y = None
-                    voxel_size_z = None
-                    pixel_size_um = None
                     
                     if pixels is not None:
                         pixel_size_x = float(pixels.get('PhysicalSizeX', 0) or 0)
@@ -670,38 +949,47 @@ class FormatConverter:
                         if pixel_size_x and pixel_size_y:
                             pixel_size_um = (pixel_size_x + pixel_size_y) / 2
                     
-                    # Extract channel names
                     channels = root.findall('.//ome:Channel', namespaces)
                     channel_names = [ch.get('Name', f'Channel_{i}') for i, ch in enumerate(channels)]
-                    
-                    # Get image shape
-                    data = tif.series[0].asarray()
-                    axes = tif.series[0].axes
-                    
-                    metadata = {
-                        "original_format": "ome-tiff",
-                        "axes": axes,
-                        "channel_names": channel_names,
-                        "pixel_size_um": pixel_size_um,
-                        "pixel_info": {
-                            "pixel_microns": pixel_size_um,
-                            "pixel_microns_x": pixel_size_x,
-                            "pixel_microns_y": pixel_size_y,
-                            "voxel_size_z": voxel_size_z,
-                        },
-                        "dimensions": {
-                            "width": data.shape[2] if data.ndim >= 3 else data.shape[1],
-                            "height": data.shape[1] if data.ndim >= 3 else data.shape[0],
-                            "z_levels": data.shape[0] if data.ndim >= 4 else (data.shape[0] if data.ndim == 3 and 'Z' in axes else 1),
-                            "channels": data.shape[-1] if 'C' in axes and axes[-1] == 'C' else (data.shape[0] if 'C' in axes and axes[0] == 'C' else 1),
-                            "timepoints": 1,
-                        },
-                    }
-                    
-                    self.metadata_cache[str(tiff_path)] = metadata
-                    return metadata
+                
+                # For 4D ZYXC format, dimensions are straightforward
+                if data.ndim == EXPECTED_NDIM:
+                    z, y, x, c = data.shape
+                else:
+                    # Fallback for non-standard formats
+                    z = data.shape[0] if data.ndim >= 4 else 1
+                    y = data.shape[-3] if data.ndim >= 3 else data.shape[0]
+                    x = data.shape[-2] if data.ndim >= 2 else 1
+                    c = data.shape[-1] if data.ndim >= 4 else 1
+                
+                if not channel_names:
+                    channel_names = [f'Channel_{i}' for i in range(c)]
+                
+                metadata = {
+                    "original_format": "ome-tiff",
+                    "axes": STANDARD_AXES if data.ndim == EXPECTED_NDIM else axes,
+                    "channel_names": channel_names,
+                    "pixel_size_um": pixel_size_um,
+                    "pixel_info": {
+                        "pixel_microns": pixel_size_um,
+                        "pixel_microns_x": pixel_size_x,
+                        "pixel_microns_y": pixel_size_y,
+                        "voxel_size_z": voxel_size_z,
+                    },
+                    "dimensions": {
+                        "z_levels": z,
+                        "height": y,
+                        "width": x,
+                        "channels": c,
+                        "timepoints": 1,
+                    },
+                }
+                
+                self.metadata_cache[str(tiff_path)] = metadata
+                return metadata
+                
         except Exception as e:
-            logger.warning(f"Could not extract OME-XML metadata from TIFF: {e}")
+            logger.warning(f"Could not extract metadata from TIFF: {e}")
         
         return {}
     
