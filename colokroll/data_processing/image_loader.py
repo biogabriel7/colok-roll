@@ -362,20 +362,10 @@ class ImageLoader:
         
         # Only prompt for remaining non-spatial Q dimensions
         if remaining_q:
-            print("Please identify what each remaining 'Q' dimension represents:\n")
+            error_msg = "Ambiguous dimensions detected. Please manually specify axes or update heuristics.\n"
             for q_idx in remaining_q:
-                dim_size = shape[q_idx]
-                while True:
-                    print(f"Dimension {q_idx} (size {dim_size}):")
-                    print("  Options: Z (z-slices), C (channels), T (timepoints)")
-                    response = input(f"  Enter axis type [Z/C/T]: ").strip().upper()
-                    
-                    if response in ['Z', 'C', 'T']:
-                        corrected_axes[q_idx] = response
-                        logger.info(f"Mapped Q at position {q_idx} (size {dim_size}) to '{response}'")
-                        break
-                    else:
-                        print(f"Invalid input '{response}'. Please enter Z, C, or T.\n")
+                error_msg += f"Dimension {q_idx} (size {shape[q_idx]}) could not be automatically identified.\n"
+            raise ValueError(error_msg)
         
         corrected_axes_str = ''.join(corrected_axes)
         print(f"\n✓ Corrected axes: {axes} → {corrected_axes_str}\n")
@@ -415,7 +405,9 @@ class ImageLoader:
                 # Handle different dimension configurations
                 if 'z' in reader.axes and 'c' in reader.axes:
                     # Multi-channel, multi-z
-                    reader.iter_axes = 'zc'
+                    # We iterate manually using default_coords, so we must clear iter_axes
+                    # to ensure reader[0] returns the frame at default_coords
+                    reader.iter_axes = []
                     reader.bundle_axes = 'yx'
                     
                     images = []
@@ -431,7 +423,7 @@ class ImageLoader:
                     
                 elif 'z' in reader.axes:
                     # Single channel, multi-z
-                    reader.iter_axes = 'z'
+                    reader.iter_axes = []
                     reader.bundle_axes = 'yx'
                     
                     images = []
@@ -446,7 +438,7 @@ class ImageLoader:
                     
                 elif 'c' in reader.axes:
                     # Multi-channel, single z
-                    reader.iter_axes = 'c'
+                    reader.iter_axes = []
                     reader.bundle_axes = 'yx'
                     
                     images = []
@@ -758,7 +750,11 @@ class ImageLoader:
         if len(unique_values) == 2:
             # Binary mask
             if not np.array_equal(unique_values, [0, 1]) and not np.array_equal(unique_values, [0, 255]):
-                warnings.warn(f"Unusual binary mask values: {unique_values}")
+                warnings.warn(
+                    f"Unusual binary mask values: {unique_values}",
+                    UserWarning,
+                    stacklevel=2
+                )
         
         logger.info(f"Mask contains {len(unique_values)} unique values")
     
@@ -774,7 +770,8 @@ class ImageLoader:
         if self.pixel_size_um is None:
             warnings.warn(
                 "No pixel size available. Image metadata must contain calibration information.",
-                UserWarning
+                UserWarning,
+                stacklevel=2
             )
             return None
         return self.pixel_size_um

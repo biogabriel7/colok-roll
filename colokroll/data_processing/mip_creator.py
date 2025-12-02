@@ -277,7 +277,9 @@ class MIPCreator:
         if quality_score < self.config.quality_threshold:
             warnings.warn(
                 f"Low quality projection (score: {quality_score:.2f}). "
-                f"Consider adjusting parameters or checking input data."
+                f"Consider adjusting parameters or checking input data.",
+                UserWarning,
+                stacklevel=2
             )
     
     def get_quality_metrics(self) -> Dict[str, Any]:
@@ -376,7 +378,7 @@ class MIPCreator:
         
         # Apply colormap
         import matplotlib.pyplot as plt
-        cmap = plt.get_cmap(colormap)
+        cmap = plt.colormaps.get_cmap(colormap)
         depth_colored = cmap(depth_normalized)[..., :3]  # RGB only
         
         # Weight by intensity

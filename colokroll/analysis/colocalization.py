@@ -12,7 +12,7 @@ try:
     import cupy as cp  # type: ignore
     xp = cp  # device-agnostic array module alias
     HAS_CUDA = True
-except Exception:  # pragma: no cover - fallback path
+except ImportError:  # pragma: no cover - CuPy not installed
     cp = None  # type: ignore
     xp = np
     HAS_CUDA = False
@@ -20,7 +20,7 @@ except Exception:  # pragma: no cover - fallback path
 try:
     # Prefer package import when used inside perinuclear_analysis
     from ..data_processing.image_loader import ImageLoader
-except Exception:
+except ImportError:
     # Allow running standalone in a notebook if needed
     ImageLoader = None  # type: ignore
 
@@ -30,14 +30,40 @@ try:
         apply_bleedthrough_unmix,
         subtract_background_percentile_roi,
     )
-except Exception:
+except ImportError:
     apply_bleedthrough_unmix = None  # type: ignore
     subtract_background_percentile_roi = None  # type: ignore
+
+
+# =============================================================================
+# Module-level constants
+# =============================================================================
+_EPSILON = 1e-12  # Small value to prevent division by zero
+_DEFAULT_HISTOGRAM_BINS = 256  # Default bins for Otsu thresholding
+_COSTES_MIN_POINTS = 100  # Minimum voxels for Costes threshold estimation
+_COSTES_STEPS = 256  # Number of steps for Costes threshold search
+
+
+def _to_python_float(val) -> float:
+    """Safely convert CuPy/NumPy scalar or array element to Python float."""
+    if HAS_CUDA:
+        if hasattr(val, 'get'):
+            # CuPy array - transfer to CPU
+            return float(val.get())
+        if hasattr(val, 'item'):
+            # NumPy scalar or 0-d array
+            return float(val.item())
+    if hasattr(val, 'item'):
+        return float(val.item())
+    return float(val)
 
 logger = logging.getLogger(__name__)
 
 
 def _as_zyxc(image: np.ndarray) -> np.ndarray:
+    if image.ndim == 3:
+        # Assume (Y, X, C) -> promote to (1, Y, X, C)
+        return image[None, ...]
     if image.ndim != 4:
         raise ValueError(f"Expected image shaped (Z,Y,X,C); got {image.shape}")
     return image
@@ -65,9 +91,17 @@ def _load_image_and_channels(
             val = image[nm]
             arr = val[0] if (isinstance(val, (tuple, list)) and len(val) >= 1) else val
             arr_np = _to_backend_array(arr)
-            if arr_np.ndim == 4 and arr_np.shape[-1] == 1:
+            
+            # Promote 2D (Y,X) to 3D (1,Y,X) - check ndim using int() for compatibility
+            ndim = int(arr_np.ndim)
+            if ndim == 2:
+                arr_np = arr_np[None, ...]
+            elif ndim == 4 and arr_np.shape[-1] == 1:
+                # Squeeze trailing singleton channel dimension
                 arr_np = arr_np[..., 0]
-            if arr_np.ndim != 3:
+            
+            # Validate final shape
+            if int(arr_np.ndim) != 3:
                 raise ValueError(f"Per-channel array must be 3D (Z,Y,X); got {arr_np.shape} for channel '{nm}'")
             arrays.append(arr_np)
 
@@ -119,42 +153,29 @@ def _load_image_and_channels(
     return img, ch_a, ch_b, names
 
 
-def _load_mask(mask: Union[str, Path, np.ndarray]) -> np.ndarray:
-    if isinstance(mask, (str, Path)):
-        if ImageLoader is None:
-            raise RuntimeError("ImageLoader not available; pass a numpy array instead.")
-        loader = ImageLoader()
-        m = loader.load_tif_mask(str(mask))
-    else:
-        m = mask
+def _reduce_3d_mask_to_2d(m: np.ndarray) -> np.ndarray:
+    """Select Z-slice with largest labeled area from a 3D mask."""
+    labeled_counts = [(z_idx, int((m[z_idx] > 0).sum())) for z_idx in range(m.shape[0])]
+    z_best = max(labeled_counts, key=lambda t: t[1])[0]
+    logger.info(
+        f"3D mask detected; reducing to 2D by selecting z={z_best} "
+        f"(largest labeled area) and broadcasting across Z."
+    )
+    return m[z_best]
 
-    if m.ndim == 3:
-        # Reduce labeled 3D mask to a representative 2D slice (max labeled area)
-        labeled_counts = [(z_idx, int((m[z_idx] > 0).sum())) for z_idx in range(m.shape[0])]
-        z_best = max(labeled_counts, key=lambda t: t[1])[0]
-        logger.info(
-            f"3D mask detected; reducing to 2D by selecting z={z_best} "
-            f"(largest labeled area) and broadcasting across Z."
-        )
-        m = m[z_best]
 
-    if m.ndim != 2:
-        raise ValueError(f"Mask must be 2D after reduction; got {m.shape}")
-
-    # Coerce dtype robustly while preserving label integers when possible
+def _coerce_mask_dtype(m: np.ndarray) -> np.ndarray:
+    """Convert mask to int32, handling various input dtypes."""
+    # Integer dtype: direct conversion
     if np.issubdtype(m.dtype, np.integer):
-        m_out = m.astype(np.int32)
         logger.info("Loaded labeled mask with integer dtype: %s", str(m.dtype))
-        return m_out
+        return m.astype(np.int32)
 
     # Float or other non-integer dtype: decide between binary and labeled
-    try:
-        m_min = float(np.nanmin(m))
-        m_max = float(np.nanmax(m))
-    except Exception:
-        m_min, m_max = 0.0, 0.0
+    m_min = float(np.nanmin(m)) if m.size > 0 else 0.0
+    m_max = float(np.nanmax(m)) if m.size > 0 else 0.0
 
-    if m_min >= 0.0 and m_max <= 1.0:
+    if 0.0 <= m_min <= m_max <= 1.0:
         # Likely binary/probability mask; threshold at 0.5
         logger.info("Loaded non-integer mask in [0,1]; converting to binary with threshold 0.5")
         return (m > 0.5).astype(np.int32)
@@ -162,6 +183,26 @@ def _load_mask(mask: Union[str, Path, np.ndarray]) -> np.ndarray:
     # Otherwise, assume labeled mask stored as float; round to nearest int
     logger.info("Loaded non-integer mask with range [%s, %s]; rounding to int labels", m_min, m_max)
     return np.rint(m).astype(np.int32)
+
+
+def _load_mask(mask: Union[str, Path, np.ndarray]) -> np.ndarray:
+    """Load and validate a 2D labeled mask."""
+    # Load from file if needed
+    if isinstance(mask, (str, Path)):
+        if ImageLoader is None:
+            raise RuntimeError("ImageLoader not available; pass a numpy array instead.")
+        m = ImageLoader().load_tif_mask(str(mask))
+    else:
+        m = np.asarray(mask)
+
+    # Reduce 3D to best 2D slice
+    if m.ndim == 3:
+        m = _reduce_3d_mask_to_2d(m)
+
+    if m.ndim != 2:
+        raise ValueError(f"Mask must be 2D after reduction; got {m.shape}")
+
+    return _coerce_mask_dtype(m)
 
 
 def estimate_min_area_threshold(
@@ -206,22 +247,26 @@ def _broadcast_mask_to_z(mask_2d: np.ndarray, z: int) -> np.ndarray:
 
 
 def _safe_corrcoef(a: np.ndarray, b: np.ndarray) -> float:
+    """Compute Pearson correlation coefficient with safety checks."""
     mod = xp
     if getattr(a, "size", 0) < 2 or getattr(b, "size", 0) < 2:
         return float("nan")
     a = mod.asarray(a).reshape(-1)
     b = mod.asarray(b).reshape(-1)
     # constant-vector guard using range to avoid indexing/reshape pitfalls
-    if float(mod.max(a) - mod.min(a)) == 0.0 or float(mod.max(b) - mod.min(b)) == 0.0:
+    a_range = _to_python_float(mod.max(a) - mod.min(a))
+    b_range = _to_python_float(mod.max(b) - mod.min(b))
+    if a_range == 0.0 or b_range == 0.0:
         return float("nan")
     r = mod.corrcoef(a, b)[0, 1]
-    return float(cp.asnumpy(r)) if HAS_CUDA else float(r)
+    return _to_python_float(r)
 
 
 def _overlap_coefficient(a: np.ndarray, b: np.ndarray) -> float:
+    """Compute overlap coefficient between two vectors."""
     mod = xp
-    num = float(mod.sum(a * b))
-    den = float(mod.sqrt(mod.sum(a * a) * mod.sum(b * b)))
+    num = _to_python_float(mod.sum(a * b))
+    den = _to_python_float(mod.sqrt(mod.sum(a * a) * mod.sum(b * b)))
     return num / den if den > 0 else float("nan")
 
 
@@ -254,51 +299,69 @@ def _manders_m1_m2(
 
 
 def _jaccard_on_positive(a: np.ndarray, b: np.ndarray) -> float:
+    """Compute Jaccard index on positive (>0) regions."""
     mod = xp
     a_bin = a > 0
     b_bin = b > 0
-    inter = float(mod.sum(a_bin & b_bin))
-    union = float(mod.sum(a_bin | b_bin))
+    inter = _to_python_float(mod.sum(a_bin & b_bin))
+    union = _to_python_float(mod.sum(a_bin | b_bin))
     return inter / union if union > 0 else float("nan")
 
 
 def _fit_minmax(a_vals: np.ndarray, b_vals: np.ndarray) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+    """Fit min-max scalers for two vectors."""
     mod = xp
     a_vals = mod.asarray(a_vals).reshape(-1)
     b_vals = mod.asarray(b_vals).reshape(-1)
-    a_min = float(mod.nanmin(a_vals))
-    a_max = float(mod.nanmax(a_vals))
-    b_min = float(mod.nanmin(b_vals))
-    b_max = float(mod.nanmax(b_vals))
+    a_min = _to_python_float(mod.nanmin(a_vals))
+    a_max = _to_python_float(mod.nanmax(a_vals))
+    b_min = _to_python_float(mod.nanmin(b_vals))
+    b_max = _to_python_float(mod.nanmax(b_vals))
     return (a_min, a_max), (b_min, b_max)
 
 
-def _normalize(a_mm: Tuple[float, float], b_mm: Tuple[float, float], a: np.ndarray, b: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+def _normalize(
+    a_mm: Tuple[float, float],
+    b_mm: Tuple[float, float],
+    a: np.ndarray,
+    b: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Normalize vectors using pre-fitted min-max ranges."""
     mod = xp
     a_min, a_max = a_mm
     b_min, b_max = b_mm
     a = mod.asarray(a).reshape(-1)
     b = mod.asarray(b).reshape(-1)
-    a_n = (a - a_min) / (a_max - a_min + 1e-12)
-    b_n = (b - b_min) / (b_max - b_min + 1e-12)
+    a_n = (a - a_min) / (a_max - a_min + _EPSILON)
+    b_n = (b - b_min) / (b_max - b_min + _EPSILON)
     return a_n.astype(mod.float32, copy=False), b_n.astype(mod.float32, copy=False)
 
 
-def _otsu_threshold_1d(values: np.ndarray, *, bins: int = 256) -> float:
+def _otsu_threshold_1d(values: np.ndarray, *, bins: int = _DEFAULT_HISTOGRAM_BINS) -> float:
     """
-    Compute Otsu threshold on a 1D array. Works for arbitrary value ranges.
-    Returns a threshold in the same scale as the input values.
+    Compute Otsu threshold on a 1D array.
+    
+    Works for arbitrary value ranges. Returns a threshold in the same scale
+    as the input values.
+    
+    Args:
+        values: 1D array of intensity values.
+        bins: Number of histogram bins for threshold computation.
+    
+    Returns:
+        Optimal threshold value, or nan if computation fails.
     """
     if values.size == 0:
         return float("nan")
+    
     # Prefer GPU histogram for large arrays; CPU for very small to avoid overhead
     if HAS_CUDA and values.size >= 4096:
         vals = cp.asarray(values)
         vals = vals[xp.isfinite(vals)]
         if vals.size == 0:
             return float("nan")
-        vmin = float(xp.min(vals))
-        vmax = float(xp.max(vals))
+        vmin = _to_python_float(xp.min(vals))
+        vmax = _to_python_float(xp.max(vals))
         if vmax <= vmin:
             return vmin
         hist, bin_edges = xp.histogram(vals, bins=bins, range=(vmin, vmax))
@@ -307,9 +370,9 @@ def _otsu_threshold_1d(values: np.ndarray, *, bins: int = 256) -> float:
         omega = xp.cumsum(prob)
         mu = xp.cumsum(prob * (xp.arange(bins)))
         mu_t = mu[-1]
-        sigma_b2 = (mu_t * omega - mu) ** 2 / (omega * (1.0 - omega) + 1e-12)
+        sigma_b2 = (mu_t * omega - mu) ** 2 / (omega * (1.0 - omega) + _EPSILON)
         idx = int(xp.nanargmax(sigma_b2))
-        t = float((bin_edges[idx] + bin_edges[idx + 1]) * 0.5)
+        t = _to_python_float((bin_edges[idx] + bin_edges[idx + 1]) * 0.5)
         return t
 
     # CPU path: explicitly convert CuPy arrays to NumPy if needed
@@ -330,7 +393,7 @@ def _otsu_threshold_1d(values: np.ndarray, *, bins: int = 256) -> float:
     omega = np.cumsum(prob)
     mu = np.cumsum(prob * (np.arange(bins)))
     mu_t = mu[-1]
-    sigma_b2 = (mu_t * omega - mu) ** 2 / (omega * (1.0 - omega) + 1e-12)
+    sigma_b2 = (mu_t * omega - mu) ** 2 / (omega * (1.0 - omega) + _EPSILON)
     idx = int(np.nanargmax(sigma_b2))
     # Place threshold between idx and idx+1
     t = float((bin_edges[idx] + bin_edges[idx + 1]) * 0.5)
@@ -338,6 +401,7 @@ def _otsu_threshold_1d(values: np.ndarray, *, bins: int = 256) -> float:
 
 
 def _linear_regression_slope_intercept(x: np.ndarray, y: np.ndarray) -> Tuple[float, float]:
+    """Compute linear regression slope and intercept."""
     mod = xp
     if x.size == 0 or y.size == 0:
         # Safe conversion: handle CuPy arrays explicitly
@@ -345,14 +409,14 @@ def _linear_regression_slope_intercept(x: np.ndarray, y: np.ndarray) -> Tuple[fl
         return 0.0, float(np.nanmean(np.asarray(y_cpu)) if y.size else 0.0)
     x = mod.asarray(x)
     y = mod.asarray(y)
-    x_mean = float(mod.mean(x))
-    y_mean = float(mod.mean(y))
+    x_mean = _to_python_float(mod.mean(x))
+    y_mean = _to_python_float(mod.mean(y))
     dx = x - x_mean
     dy = y - y_mean
-    denom = float(mod.sum(dx * dx))
+    denom = _to_python_float(mod.sum(dx * dx))
     if denom == 0.0:
         return 0.0, y_mean
-    slope = float(mod.sum(dx * dy) / denom)
+    slope = _to_python_float(mod.sum(dx * dy) / denom)
     intercept = y_mean - slope * x_mean
     return slope, intercept
 
@@ -361,8 +425,8 @@ def _costes_thresholds(
     a: np.ndarray,
     b: np.ndarray,
     *,
-    steps: int = 256,
-    min_points: int = 100,
+    steps: int = _COSTES_STEPS,
+    min_points: int = _COSTES_MIN_POINTS,
 ) -> Tuple[float, float]:
     """
     Compute Costes automatic thresholds for two vectors a, b.
@@ -374,16 +438,25 @@ def _costes_thresholds(
     - Select the largest thresholds where Pearson(a<=t_a, b<=t_b) <= 0
       with at least 'min_points' voxels; otherwise choose the pair with
       Pearson closest to 0 from the positive side.
+    
+    Args:
+        a: First channel intensity vector.
+        b: Second channel intensity vector.
+        steps: Number of threshold steps to search.
+        min_points: Minimum number of points required for correlation.
+    
+    Returns:
+        Tuple of (threshold_a, threshold_b).
     """
     mod = xp
     a_f = a[mod.isfinite(a)]
     b_f = b[mod.isfinite(b)]
     if a_f.size == 0 or b_f.size == 0:
         return float("nan"), float("nan")
-    a_min = float(mod.min(a_f))
-    a_max = float(mod.max(a_f))
-    b_min = float(mod.min(b_f))
-    b_max = float(mod.max(b_f))
+    a_min = _to_python_float(mod.min(a_f))
+    a_max = _to_python_float(mod.max(a_f))
+    b_min = _to_python_float(mod.min(b_f))
+    b_max = _to_python_float(mod.max(b_f))
     if a_max <= a_min or b_max <= b_min:
         return a_min, b_min
 
@@ -397,10 +470,7 @@ def _costes_thresholds(
         t_a = a_min + (a_max - a_min) * (k / steps)
         t_b = slope * t_a + intercept
         # clip into observed range
-        if t_b < b_min:
-            t_b = b_min
-        if t_b > b_max:
-            t_b = b_max
+        t_b = max(b_min, min(b_max, t_b))
         mask = (a <= t_a) & (b <= t_b)
         if int(xp.count_nonzero(mask)) < min_points:
             continue
@@ -518,6 +588,41 @@ def _filter_labels(
     return out.astype(np.int32), info
 
 
+def _compute_thresholds(
+    a: np.ndarray,
+    b: np.ndarray,
+    thresholding: str,
+    fixed_thresholds: Optional[Tuple[float, float]] = None,
+) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Compute thresholds for Manders coefficients based on selected strategy.
+    
+    Args:
+        a: First channel intensity vector.
+        b: Second channel intensity vector.
+        thresholding: Strategy - 'none', 'otsu', 'costes', or 'fixed'.
+        fixed_thresholds: Required if thresholding='fixed'.
+    
+    Returns:
+        Tuple of (threshold_a, threshold_b), or (None, None) for 'none'.
+    
+    Raises:
+        ValueError: If thresholding method is unknown or fixed_thresholds missing.
+    """
+    if thresholding == "none":
+        return None, None
+    elif thresholding == "otsu":
+        return _otsu_threshold_1d(a), _otsu_threshold_1d(b)
+    elif thresholding == "costes":
+        return _costes_thresholds(a, b)
+    elif thresholding == "fixed":
+        if not fixed_thresholds:
+            raise ValueError("fixed_thresholds must be provided when thresholding='fixed'")
+        return float(fixed_thresholds[0]), float(fixed_thresholds[1])
+    else:
+        raise ValueError(f"thresholding must be one of {{'none','otsu','costes','fixed'}}, got '{thresholding}'")
+
+
 def _plot_mask_with_indices(
     mask_original: np.ndarray,
     kept: List[int],
@@ -525,9 +630,10 @@ def _plot_mask_with_indices(
     title: str = "Mask (labels)",
     show: bool = True,
 ) -> None:
+    """Plot mask with label indices annotated (kept=black, removed=red)."""
     try:
         import matplotlib.pyplot as plt  # type: ignore
-    except Exception as e:
+    except ImportError as e:
         logger.warning(f"matplotlib not available; skipping plot: {e}")
         return
 
@@ -619,7 +725,7 @@ def compute_colocalization(
     # Keep a copy of original mask for visualization
     mask_original = mask_2d.copy()
     
-    # Automatically remove label 1 (background in most segmentation tools)
+    # Automatically remove label 1 (background in Cellpose)
     has_label_1 = np.any(mask_2d == 1)
     if has_label_1:
         mask_2d[mask_2d == 1] = 0
@@ -749,25 +855,8 @@ def compute_colocalization(
             else:
                 raise ValueError("threshold_domain must be one of {'raw','normalized'}")
             
-            # Determine thresholds for this Z-slice
-            t_a_z: Optional[float]
-            t_b_z: Optional[float]
-            if thresholding == "none":
-                t_a_z = None
-                t_b_z = None
-            elif thresholding == "otsu":
-                t_a_z = _otsu_threshold_1d(a_tsrc_z)
-                t_b_z = _otsu_threshold_1d(b_tsrc_z)
-            elif thresholding == "costes":
-                ta_c, tb_c = _costes_thresholds(a_tsrc_z, b_tsrc_z)
-                t_a_z = ta_c
-                t_b_z = tb_c
-            elif thresholding == "fixed":
-                if not fixed_thresholds:
-                    raise ValueError("fixed_thresholds must be provided when thresholding='fixed'")
-                t_a_z, t_b_z = float(fixed_thresholds[0]), float(fixed_thresholds[1])
-            else:
-                raise ValueError("thresholding must be one of {'none','otsu','costes','fixed'}")
+            # Determine thresholds for this Z-slice using extracted helper
+            t_a_z, t_b_z = _compute_thresholds(a_tsrc_z, b_tsrc_z, thresholding, fixed_thresholds)
             
             # Compute Manders for this Z-slice
             m1_z, m2_z = _manders_m1_m2(a_tsrc_z, b_tsrc_z, t_a=t_a_z, t_b=t_b_z)

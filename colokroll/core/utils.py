@@ -197,7 +197,7 @@ def get_colormap_from_fluorophore(channel_name: str):
     }
     
     cmap_name = color_to_cmap.get(color_name, 'viridis')
-    return plt.cm.get_cmap(cmap_name)
+    return plt.colormaps.get_cmap(cmap_name)
 
 
 def calculate_image_checksum(image: np.ndarray) -> str:

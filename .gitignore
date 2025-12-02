@@ -35,3 +35,5 @@ colokroll.egg-info/
 
 # Specific files in specific directories
 tests/test_focus_detection.py
+*.csv
+*.png
