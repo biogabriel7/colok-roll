@@ -27,7 +27,7 @@ ColokRoll is a Python toolkit designed for analyzing colocalization in multi-cha
 - **Nuclei detection**: Automated nuclei identification
 - **Colocalization metrics**: Pearson, Manders, and intensity correlation analysis
 
-### 📊 Visualization
+### Visualization
 - Multi-channel composite generation
 - Segmentation overlays with cell boundaries
 - Z-slice focus score plots
@@ -35,7 +35,7 @@ ColokRoll is a Python toolkit designed for analyzing colocalization in multi-cha
 
 ---
 
-## 🚀 Installation
+## Installation
 
 ### Using pip (recommended)
 
@@ -81,7 +81,7 @@ pip install -e ".[dev]"
 
 ---
 
-## 📖 Quick Start
+## Quick Start
 
 ### Basic Image Loading and Projection
 

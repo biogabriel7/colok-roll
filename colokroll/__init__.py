@@ -20,7 +20,7 @@ from .core import (
 )
 
 # Data processing
-from .data_processing import ImageLoader, MIPCreator
+from .data_processing import ImageLoader, MIPCreator, SMEResult
 
 # Imaging preprocessing
 from .imaging_preprocessing import (
@@ -35,7 +35,7 @@ from .imaging_preprocessing import (
 from .visualization import Visualizer, plot_mip, plot_channels
 
 # Analysis modules
-from .analysis import CellSegmenter, NucleiDetector
+from .analysis import CellSegmenter, CellposeResult, NucleiDetector
 
 # Export all public components
 __all__ = [
@@ -57,6 +57,7 @@ __all__ = [
     # Data processing
     "ImageLoader",
     "MIPCreator",
+    "SMEResult",
     
     # Imaging preprocessing
     "ZSliceSelectionResult",
@@ -72,5 +73,6 @@ __all__ = [
     
     # Analysis
     "CellSegmenter",
+    "CellposeResult",
     "NucleiDetector",
 ]
