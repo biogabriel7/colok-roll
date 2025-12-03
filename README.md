@@ -1,27 +1,61 @@
-# colok&roll
+# 🔬 ColokRoll
 
-A Python toolkit for perinuclear and colocalization analysis in confocal microscopy images. The library bundles image loading, preprocessing, segmentation, quantitative analysis, and visualization utilities so you can run the entire workflow with a single installation.
+**Colocalization analysis toolkit for fluorescence microscopy images**
+
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+
+ColokRoll is a Python toolkit designed for analyzing colocalization in multi-channel fluorescence microscopy images. It provides a complete pipeline from image loading to cell segmentation and colocalization quantification.
+
+---
 
 ## Features
-- Robust image ingestion with automatic conversion from ND2 and OIR into OME-TIFF while preserving metadata
-- Multi-channel 3D support, including maximum-intensity projections and per-channel utilities
-- CUDA-accelerated background subtraction with automatic CPU fallbacks for non-GPU paths
-- Cell and nuclei segmentation powered by Cellpose and Torch
-- Ring analysis, signal quantification, and colocalization helpers for downstream statistics
-- Ready-to-use visualization helpers for quick inspection of intermediate results
 
-## Installation
+### Data Processing
+- **Multi-format support**: Load images from `.nd2` (Nikon), `.oir` (Olympus), `.ome.tiff`, and standard TIFF formats
+- **MIP Creation**: Maximum Intensity Projection with multiple methods
+- **SME Projection**: Surface Manifold Extraction for 2.5D object handling with improved signal preservation
 
-### Conda Installation (Recommended)
+### Image Preprocessing
+- **Z-slice detection**: Automatically identify and filter out-of-focus slices using focus metrics (Laplacian, Tenengrad, FFT)
+- **Background subtraction**: Rolling ball algorithm with optional GPU acceleration (CuPy)
+- **Quality control**: Focus quality metrics and automated slice selection
 
-The easiest way to install `colok-roll` with all dependencies is using conda:
+### Analysis
+- **Cell segmentation**: Integration with [Cellpose](https://www.cellpose.org/) via HuggingFace Spaces API
+- **Nuclei detection**: Automated nuclei identification
+- **Colocalization metrics**: Pearson, Manders, and intensity correlation analysis
+
+### 📊 Visualization
+- Multi-channel composite generation
+- Segmentation overlays with cell boundaries
+- Z-slice focus score plots
+- SME manifold visualization
+
+---
+
+## 🚀 Installation
+
+### Using pip (recommended)
 
 ```bash
 # Clone the repository
-git clone https://github.com/TheSaezAtienzarLab/colok-roll.git
+git clone https://github.com/SaezAtienzar/colok-roll.git
 cd colok-roll
 
-# Create and activate the environment with all dependencies
+# Install in development mode
+pip install -e .
+```
+
+### Using conda
+
+```bash
+# Clone the repository
+git clone https://github.com/SaezAtienzar/colok-roll.git
+cd colok-roll
+
+# Create environment from file
 conda env create -f environment.yml
 conda activate colok-roll
 
@@ -29,119 +63,156 @@ conda activate colok-roll
 pip install -e .
 ```
 
-This single command installs **all dependencies** needed for the complete analysis pipeline:
-- Image processing and I/O (numpy, scipy, scikit-image, opencv)
-- Deep learning segmentation (PyTorch, TensorFlow, Cellpose, StarDist)
-- GPU acceleration (CuPy with CUDA support)
-- Data analysis and export (pandas, seaborn, openpyxl, xlsxwriter)
-- Visualization (matplotlib, Jupyter)
-
-See [CONDA_INSTALL.md](CONDA_INSTALL.md) for detailed installation instructions and troubleshooting.
-
-### Pip Installation
+### Optional dependencies
 
 ```bash
-pip install colokroll
-```
+# For deep learning features (StarDist, etc.)
+pip install -e ".[ml]"
 
-Note: pip installation may require manual setup of CUDA and other system dependencies.
+# For GPU acceleration (requires CUDA)
+pip install -e ".[gpu]"
 
-### Developer Installation
+# Full installation
+pip install -e ".[full]"
 
-For development with testing and documentation tools:
-
-```bash
-conda activate colok-roll
+# Development tools
 pip install -e ".[dev]"
 ```
 
-This includes: pytest, black, flake8, sphinx, and jupyterlab.
+---
 
-## Quick start
+## 📖 Quick Start
+
+### Basic Image Loading and Projection
+
 ```python
-from colokroll import ImageLoader, CellSegmenter
-from colokroll.imaging_preprocessing.background_subtraction import BackgroundSubtractor
-from colokroll.visualization import plot_mip
+from colokroll.data_processing import ImageLoader, MIPCreator
 
+# Load a microscopy image
 loader = ImageLoader()
-image = loader.load_image("path/to/sample.oir")  # automatically converts to OME-TIFF
-channel_names = loader.get_channel_names() or loader.rename_channels(["LAMP1", "Phalloidin", "ALIX", "DAPI"])
+image = loader.load_image("path/to/image.x")
 
-# Optional preprocessing (requires CUDA if using BackgroundSubtractor)
-bg_subtractor = BackgroundSubtractor()
-processed = bg_subtractor.subtract_background(image[..., 0], channel_name=channel_names[0])[0]
+print(f"Image shape: {image.shape}")  # (Z, Y, X, C)
+print(f"Channels: {loader.get_channel_names()}")
+print(f"Pixel size: {loader.get_pixel_size()} μm")
 
-segmenter = CellSegmenter()
-result = segmenter.segment_from_file(
-    "path/to/sample.ome.tiff",
-    channel_names=channel_names,
-    channel_a="Phalloidin",
-    channel_b="DAPI",
+# Create Maximum Intensity Projection
+mip_creator = MIPCreator()
+mip = mip_creator.create_mip(image, method="max")
+```
+
+### Z-Slice Filtering + SME Projection
+
+```python
+from colokroll.imaging_preprocessing import select_z_slices
+from colokroll.data_processing import MIPCreator
+
+# Filter out-of-focus slices
+result = select_z_slices(
+    image,
+    method="combined",      # Focus metric
+    strategy="relative",    # Detection strategy
+    threshold=0.6,          # Quality threshold
 )
 
-plot_mip(image, channel_names=channel_names)
+# Keep only in-focus slices
+filtered_image = image[result.indices_keep]
+print(f"Kept {len(result.indices_keep)}/{image.shape[0]} slices")
+
+# Create SME projection for better signal preservation
+mip_creator = MIPCreator()
+sme_result = mip_creator.create_sme(
+    filtered_image,
+    reference_channel=1,    # Channel for manifold computation
+)
+
+projection = sme_result.projection  # (Y, X, C)
+manifold = sme_result.manifold      # Optimal Z per pixel
 ```
 
-## Workflow overview
-1. Load ND2, OIR, or OME-TIFF files with automatic metadata extraction
-2. (Optional) Apply preprocessing modules: background subtraction, denoising, deconvolution
-3. Segment nuclei and cells, then build perinuclear rings
-4. Quantify channel intensities and compute colocalization statistics
-5. Visualize results or export tables for further analysis
+### Cell Segmentation with Cellpose
 
-## Module layout
+```python
+from colokroll.analysis.cell_segmentation import CellSegmenter
+
+# Initialize segmenter
+segmenter = CellSegmenter(
+    output_dir="/path/to/output",
+)
+
+# Segment cells from image array
+result = segmenter.segment_from_image_array(
+    image=filtered_image,
+    channel_indices=(1, 3),      # (cell body, nuclei)
+    channel_weights=(0.8, 0.2),  # Composite weights
+)
+
+print(f"Detected {result.mask_array.max()} cells")
+print(f"Mask saved to: {result.mask_path}")
+```
+
+---
+
+## Module Overview
+
 ```
 colokroll/
-├── core/                  # Configuration, format conversion, and shared utilities
-├── data_processing/       # Image loaders and MIP creation
-├── imaging_preprocessing/ # Background subtraction and Z-slice detection
-├── analysis/              # Segmentation, colocalization, and quantification
-└── visualization/         # Visualization helpers
+├── core/                    # Configuration, utilities, format conversion
+├── data_processing/         # Image loading and projection methods
+│   ├── image_loader.py      # Multi-format image loader
+│   └── projection.py        # MIP and SME projection
+├── imaging_preprocessing/   # Image preprocessing pipeline
+│   ├── z_slice_detection.py # Focus-based slice filtering
+│   └── background_subtraction/
+├── analysis/                # Analysis algorithms
+│   ├── cell_segmentation.py # Cellpose integration
+│   ├── nuclei_detection.py  # Nuclei identification
+│   └── colocalization.py    # Colocalization metrics
+└── visualization/           # Plotting and visualization tools
 ```
 
-## Supported file formats
-- OME-TIFF (native processing format)
-- ND2 (Nikon) with conversion to OME-TIFF
-- OIR (Olympus) with conversion to OME-TIFF
-- Standard TIFF/PNG/JPG for masks and derived outputs
+---
 
-## Runtime dependencies
-Installed alongside the package:
-- numpy, scikit-image, matplotlib, Pillow, tifffile
-- nd2reader for Nikon pipelines
-- cellpose, stardist, pytorch, tensorflow for segmentation
-- cupy for GPU acceleration
-- scipy, pandas, seaborn, openpyxl, xlsxwriter for quantification and reporting
-- gradio_client and PyYAML for remote processing
+## Configuration
 
-## Publishing
+### Cellpose API Setup
 
-To publish this package to conda-forge for public distribution:
+Cell segmentation uses the HuggingFace Cellpose Space. Set your token:
 
-1. **Quick Start**: See [QUICK_PUBLISH_GUIDE.md](QUICK_PUBLISH_GUIDE.md)
-2. **Detailed Guide**: See [PUBLISHING.md](PUBLISHING.md)
-
-After publishing to conda-forge, users will be able to install with:
 ```bash
-conda install -c conda-forge colok-roll
+export HUGGINGFACE_TOKEN="your_token_here"
 ```
 
-## Contributing
-We welcome pull requests! Please open an issue to discuss large changes, follow the linting/test suite (`pytest`), and format code with `black` before submission.
+Or create a `.env` file in your project directory.
 
-## Citation
-```bibtex
-@software{colokroll,
-  title={colok&roll: A Python Library for Confocal Microscopy Image Analysis},
-  author={Gabriel Duarte},
-  year={2024},
-  url={https://github.com/TheSaezAtienzarLab/colok-roll}
-}
+### GPU Acceleration
+
+For GPU-accelerated background subtraction, install CuPy:
+
+```bash
+pip install cupy-cuda12x  # For CUDA 12.x
 ```
+
+---
 
 ## License
-Released under the MIT License. See the [LICENSE](LICENSE) file for details.
 
-## Support
-- Issues: https://github.com/TheSaezAtienzarLab/colok-roll/issues
-- Email: gabriel.duarte@osumc.edu
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+---
+
+## Acknowledgments
+
+- [Cellpose](https://github.com/MouseLand/cellpose) for cell segmentation
+- [BioIO](https://github.com/bioio-devs/bioio) for microscopy file format support
+- [scikit-image](https://scikit-image.org/) for image processing algorithms
+
+---
+
+## Contact
+
+**SaezAtienzar Lab**
+
+- GitHub: [@SaezAtienzar](https://github.com/SaezAtienzar)
+- Repository: [colok-roll](https://github.com/SaezAtienzar/colok-roll)
+

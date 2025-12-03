@@ -34,11 +34,10 @@ colokroll.egg-info/
 *.out
 
 # Specific files in specific directories
-tests/test_focus_detection.py
 *.csv
 *.png
 
-/tests/test-conversion
+/tests/tests
 
 .venv/
 uv.lock
@@ -55,3 +54,5 @@ uv.lock
 .env.test.local
 .env.production.local
 paper/
+
+*.DS_Store

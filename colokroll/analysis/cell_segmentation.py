@@ -20,7 +20,7 @@ import numpy as np
 import tifffile as tiff
 
 from ..data_processing.image_loader import ImageLoader
-from ..data_processing.mip_creator import MIPCreator
+from ..data_processing.projection import MIPCreator
 from .segmentation_config import get_hf_token
 
 
@@ -92,8 +92,8 @@ class CellSegmenter:
         cellpose_space: str = "mouseland/cellpose",
         resize_candidates: Sequence[int] = (),
         *,
-        auto_resize: bool = True,
-        max_resize_cap: int = 2500,
+        auto_resize: bool = False,
+        max_resize_cap: int = 600,
         max_iter: int = 250,
         flow_threshold: float = 0.4,
         cellprob_threshold: float = 0.0,
@@ -191,16 +191,15 @@ class CellSegmenter:
         elif output_format == "png8":
             from imageio import imwrite
             path = Path(out_path) if out_path is not None else self.tmp_dir / "cellpose_composite.png"
-            # Use 1-99.9 percentiles for 8-bit mapping
-            u16 = self._to_u16_percentile(composite01, percentiles=percentiles, apply_clahe=apply_clahe)
-            imwrite(str(path), (u16 // 257).astype(np.uint8))
+            # Simple conversion matching batch_whole_analysis.py approach
+            imwrite(str(path), (composite01 * 255).astype(np.uint8))
             return path
         else:
             raise ValueError("output_format must be one of {'tiff16','png8'}")
 
     def _client(self) -> Client:
         token = get_hf_token(self.hf_token_env)
-        return Client(self.cellpose_space, hf_token=token)
+        return Client(self.cellpose_space, token=token)
 
     def _run_cellpose(self, client: Client, png_path: Path, resize: int, use_update: bool = True):
         # Optionally perform the update_button step first
@@ -212,8 +211,8 @@ class CellSegmenter:
         self._logger.info("Calling /cellpose_segment (resize=%s)", resize)
         return client.predict(
             filepath=[handle_file(str(png_path))],
-            resize=float(resize),
-            max_iter=float(self.max_iter),
+            resize=int(resize),
+            max_iter=int(self.max_iter),
             flow_threshold=float(self.flow_threshold),
             cellprob_threshold=float(self.cellprob_threshold),
             api_name="/cellpose_segment",
@@ -247,8 +246,8 @@ class CellSegmenter:
             image,
             channel_indices,
             channel_weights,
-            projection="middle",
-            output_format="tiff16",
+            projection="mip",
+            output_format="png8",
             percentiles=(1.0, 99.9),
             apply_clahe=False,
         )
@@ -271,7 +270,7 @@ class CellSegmenter:
             # Ensure strictly positive integers and unique, descending
             candidates = sorted({int(x) for x in base if int(x) > 0}, reverse=True)
         else:
-            candidates = list(self.resize_candidates) or [1000, 800, 600, 400]
+            candidates = list(self.resize_candidates) or [600, 400]
         client = self._client()
 
         last_error: Optional[BaseException] = None
@@ -330,8 +329,8 @@ class CellSegmenter:
         channel_b: Union[int, str] = 1,
         channel_weights: Tuple[float, float] = (0.8, 0.2),
         *,
-        projection: str = "middle",
-        output_format: str = "tiff16",
+        projection: str = "mip",
+        output_format: str = "png8",
         percentiles: Tuple[float, float] = (1.0, 99.9),
         apply_clahe: bool = False,
     ) -> CellposeResult:
@@ -389,7 +388,7 @@ class CellSegmenter:
             base = [start, 2200, 2000, 1800, 1600, 1400, 1200, 1000, 800, 600, 400]
             candidates = sorted({int(x) for x in base if int(x) > 0}, reverse=True)
         else:
-            candidates = list(self.resize_candidates) or [1000, 800, 600, 400]
+            candidates = list(self.resize_candidates) or [600, 400]
 
         # First pass: with update_button
         for rs in candidates:
@@ -441,8 +440,8 @@ class CellSegmenter:
         channel_a: str,
         channel_b: str,
         channel_weights: Tuple[float, float] = (0.8, 0.2),
-        projection: str = "middle",
-        output_format: str = "tiff16",
+        projection: str = "mip",
+        output_format: str = "png8",
         percentiles: Tuple[float, float] = (1.0, 99.9),
         apply_clahe: bool = False,
         save_basename: Optional[str] = None,
@@ -485,7 +484,7 @@ class CellSegmenter:
             base = [start, 2200, 2000, 1800, 1600, 1400, 1200, 1000, 800, 600, 400]
             candidates = sorted({int(x) for x in base if int(x) > 0}, reverse=True)
         else:
-            candidates = list(self.resize_candidates) or [1000, 800, 600, 400]
+            candidates = list(self.resize_candidates) or [600, 400]
 
         # First pass: with update_button
         for rs in candidates:

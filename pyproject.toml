@@ -31,6 +31,7 @@ dependencies = [
     "scipy>=1.7",
     "pandas>=1.4",
     "scikit-image>=0.19",
+    "scikit-learn>=1.0",
     "opencv-python>=4.5",
     "pillow>=9.0",
     "tifffile>=2023.7",
