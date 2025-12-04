@@ -672,7 +672,8 @@ def compute_colocalization(
     fixed_thresholds: Optional[Tuple[float, float]] = None,  # used if thresholding='fixed' -> (t_a, t_b)
     channel_names: Optional[List[str]] = None,
     # Filtering and plotting controls
-    min_area: int = 0,
+    min_area: Union[int, str] = "auto",  # int or "auto" to estimate from mask
+    min_area_fraction: float = 0.7,  # fraction of median area when min_area="auto"
     max_border_fraction: Optional[float] = None,
     border_margin_px: int = 1,
     plot_mask: bool = True,
@@ -681,6 +682,8 @@ def compute_colocalization(
     background_subtract: Optional[Dict[str, Any]] = None,  # {"percentile": 1.0}
     # Threshold domain selection
     threshold_domain: str = "raw",  # 'raw'|'normalized'
+    # Output options
+    output_json: Optional[Union[str, Path]] = None,  # save results to JSON if provided
 ) -> Dict[str, Any]:
     """
     Compute colocalization metrics between two channels on a ZYXC post-processed image.
@@ -692,8 +695,21 @@ def compute_colocalization(
         'mask'   -> MinMaxScaler fit on all voxels inside union of labels (recommended).
         'global' -> MinMaxScaler fit on all voxels (entire ZYX).
         'none'   -> no normalization (computations on raw intensities).
+    - min_area: int for fixed threshold, or "auto" to estimate from median cell area.
+    - min_area_fraction: when min_area="auto", use this fraction of median area (default 0.7).
+    - output_json: optional path to save results as JSON.
     Returns a JSON-serializable dict with per-label and total_image metrics.
     """
+    img, ch_a, ch_b, names = _load_image_and_channels(image, channel_a, channel_b, channel_names)
+    mask_2d = _load_mask(mask)
+    
+    # Auto-estimate min_area from mask if requested
+    if min_area == "auto":
+        min_area = estimate_min_area_threshold(mask_2d, fraction_of_median=min_area_fraction)
+        logger.info(f"Auto-estimated min_area threshold: {min_area} (fraction={min_area_fraction})")
+    else:
+        min_area = int(min_area)
+    
     logger.info(
         "Starting compute_colocalization(ch_a=%s, ch_b=%s, normalization_scope=%s, min_area=%d, max_border_fraction=%s, border_margin_px=%d, plot_mask=%s)",
         str(channel_a),
@@ -704,8 +720,6 @@ def compute_colocalization(
         int(border_margin_px),
         str(plot_mask),
     )
-    img, ch_a, ch_b, names = _load_image_and_channels(image, channel_a, channel_b, channel_names)
-    mask_2d = _load_mask(mask)
     logger.info(
         "Image loaded: shape=%s, channels=%s | Mask loaded: shape=%s, unique_labels=%d",
         tuple(int(x) for x in img.shape),
@@ -936,6 +950,11 @@ def compute_colocalization(
             "summary": summary,
         },
     }
+    
+    # Save to JSON if output path provided
+    if output_json is not None:
+        export_colocalization_json(out, output_json)
+    
     logger.info("compute_colocalization finished.")
     return out
 

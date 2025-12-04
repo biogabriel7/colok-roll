@@ -13,6 +13,7 @@ Features:
 
 Input: 3D numpy arrays (Z, Y, X) from ome.tiff files
 """
+from __future__ import annotations
 
 import logging
 from typing import Dict, Any, Optional, Tuple, List

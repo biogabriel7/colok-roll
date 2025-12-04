@@ -33,11 +33,11 @@ colokroll.egg-info/
 *.err
 *.out
 
+tests/
+
 # Specific files in specific directories
 *.csv
 *.png
-
-/tests/tests
 
 .venv/
 uv.lock

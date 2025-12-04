@@ -47,6 +47,8 @@ dependencies = [
     "bioio>=1.0.0",
     "bioio-ome-tiff>=1.0.0",
     "bioio-bioformats>=1.0.0",  # Requires Java JRE for OIR files
+    "h5py>=3.15.1",
+    "nd2>=0.10.4",
 ]
 
 [project.optional-dependencies]

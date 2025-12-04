@@ -35,7 +35,14 @@ from .imaging_preprocessing import (
 from .visualization import Visualizer, plot_mip, plot_channels
 
 # Analysis modules
-from .analysis import CellSegmenter, CellposeResult, NucleiDetector
+from .analysis import (
+    CellSegmenter,
+    CellposeResult,
+    NucleiDetector,
+    compute_colocalization,
+    export_colocalization_json,
+    estimate_min_area_threshold,
+)
 
 # Export all public components
 __all__ = [
@@ -75,4 +82,7 @@ __all__ = [
     "CellSegmenter",
     "CellposeResult",
     "NucleiDetector",
+    "compute_colocalization",
+    "export_colocalization_json",
+    "estimate_min_area_threshold",
 ]
