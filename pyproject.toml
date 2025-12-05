@@ -49,6 +49,8 @@ dependencies = [
     "bioio-bioformats>=1.0.0",  # Requires Java JRE for OIR files
     "h5py>=3.15.1",
     "nd2>=0.10.4",
+    "torch>=2.9.1",
+    "kornia>=0.8.2",
 ]
 
 [project.optional-dependencies]

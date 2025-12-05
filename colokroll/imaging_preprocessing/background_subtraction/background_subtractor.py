@@ -34,16 +34,34 @@ try:
     import cupy as cp
     import cupyx.scipy.ndimage as cp_ndimage
     CUDA_AVAILABLE = True
-    logger = logging.getLogger(__name__)
-    logger.info("CUDA libraries available - GPU acceleration enabled")
 except ImportError:
     CUDA_AVAILABLE = False
     cp = None
     cp_ndimage = None
-    logger = logging.getLogger(__name__)
-    logger.error("CUDA libraries not available - this module requires CUDA (CuPy)")
+
+# Try to import MPS libraries (PyTorch + kornia for Apple Silicon)
+try:
+    import torch
+    import kornia
+    MPS_AVAILABLE = torch.backends.mps.is_available() and torch.backends.mps.is_built()
+except ImportError:
+    MPS_AVAILABLE = False
+    torch = None
+    kornia = None
+
+# CPU fallback is always available via scipy
+from scipy import ndimage as sp_ndimage
+CPU_AVAILABLE = True
 
 logger = logging.getLogger(__name__)
+
+# Log available backends
+if CUDA_AVAILABLE:
+    logger.info("CUDA (CuPy) available - GPU acceleration enabled")
+elif MPS_AVAILABLE:
+    logger.info("MPS (Apple Silicon) available - GPU acceleration enabled via PyTorch")
+else:
+    logger.info("No GPU available - using CPU (SciPy) backend")
 
 
 class BackgroundSubtractor:
@@ -67,24 +85,76 @@ class BackgroundSubtractor:
     
     def __init__(self, config: Optional[BackgroundSubtractionConfig] = None, 
                  use_cuda: Optional[bool] = None,
+                 use_mps: Optional[bool] = None,
                  auto_config: Optional[Dict[str, Any]] = None):
         """
         Initialize the background subtractor.
         
         Args:
             config: Background subtraction configuration. If None, uses defaults.
-            use_cuda: Force CUDA usage (True) or CPU (False). If None, auto-detect.
+            use_cuda: Force CUDA usage (True) or disable (False). If None, auto-detect.
+            use_mps: Force MPS usage (True) or disable (False). If None, auto-detect.
+            auto_config: Custom auto-configuration dictionary.
         """
         self.config = config or BackgroundSubtractionConfig()
         self.logger = logging.getLogger(__name__)
         self.auto_cfg = auto_config or AUTO_BG_CONFIG
         
-        # Enforce CUDA-only usage
-        self.use_cuda = True
-        if not CUDA_AVAILABLE:
-            raise RuntimeError("CUDA libraries not available; BackgroundSubtractor requires CUDA (CuPy)")
-        self.logger.info("Initializing CUDA-accelerated background subtractor (CUDA required)")
-        self._initialize_cuda()
+        # Determine backend: CUDA > MPS > CPU
+        self.backend = self._select_backend(use_cuda, use_mps)
+        self.use_cuda = (self.backend == 'cuda')
+        self.use_mps = (self.backend == 'mps')
+        
+        if self.backend == 'cuda':
+            self.logger.info("Initializing CUDA-accelerated background subtractor")
+            self._initialize_cuda()
+        elif self.backend == 'mps':
+            self.logger.info("Initializing MPS-accelerated background subtractor (Apple Silicon)")
+            self._initialize_mps()
+        else:
+            self.logger.info("Initializing CPU background subtractor (SciPy)")
+            self._initialize_cpu()
+    
+    def _select_backend(self, use_cuda: Optional[bool], use_mps: Optional[bool]) -> str:
+        """Select the best available backend."""
+        # Explicit CUDA request
+        if use_cuda is True:
+            if CUDA_AVAILABLE:
+                return 'cuda'
+            else:
+                raise RuntimeError("CUDA requested but not available")
+        
+        # Explicit MPS request
+        if use_mps is True:
+            if MPS_AVAILABLE:
+                return 'mps'
+            else:
+                raise RuntimeError("MPS requested but not available")
+        
+        # Explicit disable
+        if use_cuda is False and use_mps is False:
+            return 'cpu'
+        
+        # Auto-detect: prefer CUDA > MPS > CPU
+        if CUDA_AVAILABLE and use_cuda is not False:
+            return 'cuda'
+        if MPS_AVAILABLE and use_mps is not False:
+            return 'mps'
+        return 'cpu'
+    
+    def _initialize_mps(self) -> None:
+        """Initialize MPS (Metal Performance Shaders) for Apple Silicon."""
+        self.device = torch.device('mps')
+        self.logger.info(f"MPS device initialized: {self.device}")
+        # MPS doesn't have memory query like CUDA, estimate conservatively
+        self.gpu_memory_gb = 8.0  # Assume 8GB for Apple Silicon
+        self.max_gpu_memory_gb = 6.0
+    
+    def _initialize_cpu(self) -> None:
+        """Initialize CPU backend."""
+        self.gpu_memory_gb = 0
+        self.max_gpu_memory_gb = 0
+        self.logger.info("CPU backend initialized (no GPU acceleration)")
     
     def _initialize_cuda(self) -> None:
         """Initialize CUDA context and check GPU memory."""
@@ -142,8 +212,15 @@ class BackgroundSubtractor:
         if method == 'auto':
             return self._auto_subtract_background(image, channel_name, pixel_size)
         
-        self.logger.info(f"Applying CUDA {method} background subtraction to 3D image {image.shape}")
-        return self._subtract_background_cuda(image, method, channel_name, pixel_size, **kwargs)
+        # Route to appropriate backend
+        self.logger.info(f"Applying {self.backend.upper()} {method} background subtraction to 3D image {image.shape}")
+        
+        if self.backend == 'cuda':
+            return self._subtract_background_cuda(image, method, channel_name, pixel_size, **kwargs)
+        elif self.backend == 'mps':
+            return self._subtract_background_mps(image, method, channel_name, pixel_size, **kwargs)
+        else:
+            return self._subtract_background_cpu(image, method, channel_name, pixel_size, chunk_size, **kwargs)
     
     def _subtract_background_cuda(
         self,
@@ -235,6 +312,8 @@ class BackgroundSubtractor:
             corrected_image, metadata = self._gaussian_subtraction_3d(image, params)
         elif method == 'morphological':
             corrected_image, metadata = self._morphological_subtraction_3d(image, params, chunk_size)
+        elif method in {'two_stage', 'gaussian_then_rolling_ball'}:
+            corrected_image, metadata = self._two_stage_subtraction_3d_cpu(image, params, chunk_size)
         else:
             raise ValueError(f"Unknown background subtraction method: {method}")
         
@@ -588,6 +667,243 @@ class BackgroundSubtractor:
         
         return corrected_image, metadata
     
+    def _two_stage_subtraction_3d_cpu(
+        self,
+        image: np.ndarray,
+        params: Dict[str, Any],
+        chunk_size: int
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """
+        Two-stage CPU background subtraction: Gaussian → Rolling Ball.
+        
+        Stage 1 removes diffuse haze; stage 2 removes local background while preserving
+        puncta/structures.
+        """
+        sigma = float(params['sigma_stage1'])
+        radius = int(params['radius_stage2'])
+        light_background = bool(params.get('light_background', False))
+        z_slices = image.shape[0]
+        
+        self.logger.info(f"Applying CPU two-stage background subtraction: Gaussian(σ={sigma}) → Rolling ball(r={radius})")
+        
+        # Stage 1: Gaussian (operates on full 3D volume)
+        gauss_bg = filters.gaussian(image, sigma=sigma, preserve_range=True)
+        gauss_corr = image.astype(np.float32) - gauss_bg.astype(np.float32)
+        
+        if getattr(self.config, 'clip_negative_values', False):
+            gauss_corr = np.clip(gauss_corr, 0, None)
+        
+        # Stage 2: Rolling ball via morphological opening/closing (slice by slice)
+        selem = morphology.disk(radius)
+        corrected_image = np.empty_like(gauss_corr, dtype=np.float32)
+        
+        for start_z in range(0, z_slices, chunk_size):
+            end_z = min(start_z + chunk_size, z_slices)
+            
+            for z in range(start_z, end_z):
+                if light_background:
+                    background = morphology.closing(gauss_corr[z], selem)
+                else:
+                    background = morphology.opening(gauss_corr[z], selem)
+                corrected_image[z] = gauss_corr[z] - background.astype(np.float32)
+            
+            gc.collect()
+        
+        metadata = {
+            'background_method': 'two_stage_cpu',
+            'stage1': {'sigma': sigma},
+            'stage2': {'radius': radius, 'light_background': light_background},
+            'gpu_accelerated': False
+        }
+        
+        del gauss_bg, gauss_corr
+        gc.collect()
+        
+        return corrected_image, metadata
+    
+    # ==================== MPS BACKEND (Apple Silicon) ====================
+    
+    def _subtract_background_mps(
+        self,
+        image: np.ndarray,
+        method: str,
+        channel_name: Optional[str],
+        pixel_size: Optional[float],
+        **kwargs
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """MPS-accelerated background subtraction using PyTorch + kornia."""
+        params = self._get_method_parameters(method, channel_name, pixel_size, **kwargs)
+        
+        # Convert to PyTorch tensor on MPS
+        img_tensor = torch.from_numpy(image.astype(np.float32)).to(self.device)
+        
+        if method == 'gaussian':
+            corrected_tensor, metadata = self._gaussian_subtraction_mps(img_tensor, params)
+        elif method in {'two_stage', 'gaussian_then_rolling_ball'}:
+            corrected_tensor, metadata = self._two_stage_subtraction_mps(img_tensor, params)
+        elif method == 'rolling_ball':
+            # Rolling ball via morphological operations
+            corrected_tensor, metadata = self._rolling_ball_subtraction_mps(img_tensor, params)
+        elif method == 'morphological':
+            corrected_tensor, metadata = self._morphological_subtraction_mps(img_tensor, params)
+        else:
+            raise ValueError(f"Unknown method: {method}")
+        
+        # Transfer back to CPU numpy
+        result = corrected_tensor.cpu().numpy()
+        
+        # Post-processing
+        if self.config.clip_negative_values:
+            result = np.clip(result, 0, None)
+        if self.config.normalize_output:
+            result = self._normalize_image(result)
+        
+        metadata.update({
+            'method': f'{method}_mps',
+            'original_shape': image.shape,
+            'parameters_used': params,
+            'gpu_accelerated': True,
+            'backend': 'mps'
+        })
+        
+        return result, metadata
+    
+    def _gaussian_subtraction_mps(
+        self,
+        img_tensor: 'torch.Tensor',
+        params: Dict[str, Any]
+    ) -> Tuple['torch.Tensor', Dict[str, Any]]:
+        """MPS Gaussian background subtraction using kornia."""
+        sigma = params['sigma']
+        
+        # kornia expects (B, C, H, W), we have (Z, H, W)
+        # Process each Z slice
+        z_slices = img_tensor.shape[0]
+        corrected = torch.empty_like(img_tensor)
+        
+        # Kernel size should be odd and ~6*sigma
+        kernel_size = int(6 * sigma) | 1  # Make odd
+        
+        for z in range(z_slices):
+            slice_4d = img_tensor[z:z+1, None, :, :]  # (1, 1, H, W)
+            background = kornia.filters.gaussian_blur2d(
+                slice_4d, 
+                kernel_size=(kernel_size, kernel_size),
+                sigma=(sigma, sigma)
+            )
+            corrected[z] = (slice_4d - background).squeeze()
+        
+        metadata = {
+            'background_method': 'gaussian_mps',
+            'sigma': sigma,
+            'kernel_size': kernel_size
+        }
+        
+        return corrected, metadata
+    
+    def _two_stage_subtraction_mps(
+        self,
+        img_tensor: 'torch.Tensor',
+        params: Dict[str, Any]
+    ) -> Tuple['torch.Tensor', Dict[str, Any]]:
+        """MPS two-stage subtraction: Gaussian → morphological opening."""
+        sigma = float(params['sigma_stage1'])
+        radius = int(params['radius_stage2'])
+        light_background = bool(params.get('light_background', False))
+        
+        z_slices = img_tensor.shape[0]
+        kernel_size = int(6 * sigma) | 1
+        
+        # Stage 1: Gaussian
+        gauss_corr = torch.empty_like(img_tensor)
+        for z in range(z_slices):
+            slice_4d = img_tensor[z:z+1, None, :, :]
+            background = kornia.filters.gaussian_blur2d(
+                slice_4d,
+                kernel_size=(kernel_size, kernel_size),
+                sigma=(sigma, sigma)
+            )
+            gauss_corr[z] = (slice_4d - background).squeeze()
+        
+        if getattr(self.config, 'clip_negative_values', False):
+            gauss_corr = torch.clamp(gauss_corr, min=0)
+        
+        # Stage 2: Morphological opening/closing
+        # kornia morphology expects kernel shape (H, W), not (B, C, H, W)
+        morph_kernel = torch.ones(2*radius+1, 2*radius+1, device=self.device)
+        corrected = torch.empty_like(gauss_corr)
+        
+        for z in range(z_slices):
+            slice_4d = gauss_corr[z:z+1, None, :, :]
+            if light_background:
+                background = kornia.morphology.closing(slice_4d, morph_kernel)
+            else:
+                background = kornia.morphology.opening(slice_4d, morph_kernel)
+            corrected[z] = (slice_4d - background).squeeze()
+        
+        metadata = {
+            'background_method': 'two_stage_mps',
+            'stage1': {'sigma': sigma},
+            'stage2': {'radius': radius, 'light_background': light_background}
+        }
+        
+        return corrected, metadata
+    
+    def _rolling_ball_subtraction_mps(
+        self,
+        img_tensor: 'torch.Tensor',
+        params: Dict[str, Any]
+    ) -> Tuple['torch.Tensor', Dict[str, Any]]:
+        """MPS rolling ball approximation via morphological opening."""
+        radius = params['radius']
+        light_background = params.get('light_background', False)
+        
+        z_slices = img_tensor.shape[0]
+        # kornia morphology expects kernel shape (H, W), not (B, C, H, W)
+        morph_kernel = torch.ones(2*radius+1, 2*radius+1, device=self.device)
+        corrected = torch.empty_like(img_tensor)
+        
+        for z in range(z_slices):
+            slice_4d = img_tensor[z:z+1, None, :, :]
+            if light_background:
+                background = kornia.morphology.closing(slice_4d, morph_kernel)
+            else:
+                background = kornia.morphology.opening(slice_4d, morph_kernel)
+            corrected[z] = (slice_4d - background).squeeze()
+        
+        metadata = {
+            'background_method': 'rolling_ball_mps',
+            'radius': radius,
+            'light_background': light_background
+        }
+        
+        return corrected, metadata
+    
+    def _morphological_subtraction_mps(
+        self,
+        img_tensor: 'torch.Tensor',
+        params: Dict[str, Any]
+    ) -> Tuple['torch.Tensor', Dict[str, Any]]:
+        """MPS morphological background subtraction."""
+        size = params['size']
+        
+        z_slices = img_tensor.shape[0]
+        # kornia morphology expects kernel shape (H, W), not (B, C, H, W)
+        morph_kernel = torch.ones(2*size+1, 2*size+1, device=self.device)
+        corrected = torch.empty_like(img_tensor)
+        
+        for z in range(z_slices):
+            slice_4d = img_tensor[z:z+1, None, :, :]
+            background = kornia.morphology.closing(slice_4d, morph_kernel)
+            corrected[z] = (slice_4d - background).squeeze()
+        
+        metadata = {
+            'background_method': 'morphological_mps',
+            'size': size
+        }
+        
+        return corrected, metadata
+    
     def _normalize_image(self, image: np.ndarray) -> np.ndarray:
         """Normalize image to 0-1 range while preserving relative intensities."""
         image_min = np.min(image)
@@ -816,6 +1132,24 @@ class BackgroundSubtractor:
         # Avoid passing 'method' twice (positional + kwargs)
         clean_params = {k: v for k, v in params.items() if k != 'method'}
         return self._subtract_background_cuda(image, method, None, None, **clean_params)
+    
+    def _run_single_mps(self, image: np.ndarray, method: str, params: Dict[str, Any]) -> Tuple[np.ndarray, Dict[str, Any]]:
+        clean_params = {k: v for k, v in params.items() if k != 'method'}
+        return self._subtract_background_mps(image, method, None, None, **clean_params)
+    
+    def _run_single_cpu(self, image: np.ndarray, method: str, params: Dict[str, Any]) -> Tuple[np.ndarray, Dict[str, Any]]:
+        clean_params = {k: v for k, v in params.items() if k != 'method'}
+        chunk_size = self._calculate_optimal_chunk_size(image.shape, image.dtype)
+        return self._subtract_background_cpu(image, method, None, None, chunk_size, **clean_params)
+    
+    def _run_single(self, image: np.ndarray, method: str, params: Dict[str, Any]) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """Run a single background subtraction using the current backend."""
+        if self.backend == 'cuda':
+            return self._run_single_cuda(image, method, params)
+        elif self.backend == 'mps':
+            return self._run_single_mps(image, method, params)
+        else:
+            return self._run_single_cpu(image, method, params)
 
     def _auto_subtract_background(self, image: np.ndarray, channel_name: Optional[str], pixel_size: Optional[float]) -> Tuple[np.ndarray, Dict[str, Any]]:
         candidates, weights, explanation, default_params, force_default = self._get_auto_param_grid(channel_name or 'DEFAULT')
@@ -835,7 +1169,8 @@ class BackgroundSubtractor:
         # If force_default, use it directly without grid search
         if force_default and default_params is not None:
             best_method = default_params['method']
-            corrected_full, metadata = self._run_single_cuda(image, best_method, default_params)
+            corrected_full, metadata = self._run_single(image, best_method, default_params)
+            method_suffix = f'_{self.backend}' if self.backend != 'cpu' else ''
             metadata.update({
                 'auto_selected': True,
                 'auto_candidates_tested': 1,
@@ -843,7 +1178,7 @@ class BackgroundSubtractor:
                 'auto_sample_indices': sample_idx.tolist(),
                 'auto_explanation': explanation,
                 'parameters_used': {k: v for k, v in default_params.items() if k != 'method'},
-                'method': 'gaussian+rolling_ball_cuda' if best_method in {'two_stage', 'gaussian_then_rolling_ball'} else metadata.get('method', f'{best_method}_cuda'),
+                'method': f'gaussian+rolling_ball{method_suffix}' if best_method in {'two_stage', 'gaussian_then_rolling_ball'} else metadata.get('method', f'{best_method}{method_suffix}'),
             })
             return corrected_full, metadata
 
@@ -851,8 +1186,8 @@ class BackgroundSubtractor:
         preferred_method = None
         if default_params is not None:
             preferred_method = default_params.get('method')
-            corrected_sample, meta = self._run_single_cuda(image_sample, preferred_method, default_params)
-            cp.cuda.Stream.null.synchronize()
+            corrected_sample, meta = self._run_single(image_sample, preferred_method, default_params)
+            self._sync_backend()
             s = self._score_volume(image_sample, corrected_sample, weights, max_slices=min(5, len(sample_idx)))
             scores_list.append({'params': default_params, 'score': float(s)})
             best_score = float(s)
@@ -861,8 +1196,8 @@ class BackgroundSubtractor:
 
         for params in candidates:
             method = params['method']
-            corrected_sample, meta = self._run_single_cuda(image_sample, method, params)
-            cp.cuda.Stream.null.synchronize()
+            corrected_sample, meta = self._run_single(image_sample, method, params)
+            self._sync_backend()
             s = self._score_volume(image_sample, corrected_sample, weights, max_slices=min(5, len(sample_idx)))
             scores_list.append({'params': params, 'score': float(s)})
             # Prefer default method on ties within epsilon
@@ -877,7 +1212,8 @@ class BackgroundSubtractor:
                 break
 
         assert best_method is not None and best_params is not None
-        corrected_full, metadata = self._run_single_cuda(image, best_method, best_params)
+        corrected_full, metadata = self._run_single(image, best_method, best_params)
+        method_suffix = f'_{self.backend}' if self.backend != 'cpu' else ''
         metadata.update({
             'auto_selected': True,
             'auto_candidates_tested': len(scores_list),
@@ -885,9 +1221,17 @@ class BackgroundSubtractor:
             'auto_sample_indices': sample_idx.tolist(),
             'auto_explanation': explanation,
             'parameters_used': {k: v for k, v in best_params.items() if k != 'method'},
-            'method': 'gaussian+rolling_ball_cuda' if best_method in {'two_stage', 'gaussian_then_rolling_ball'} else metadata.get('method', f'{best_method}_cuda'),
+            'method': f'gaussian+rolling_ball{method_suffix}' if best_method in {'two_stage', 'gaussian_then_rolling_ball'} else metadata.get('method', f'{best_method}{method_suffix}'),
         })
         return corrected_full, metadata
+    
+    def _sync_backend(self) -> None:
+        """Synchronize the current backend (wait for GPU operations to complete)."""
+        if self.backend == 'cuda':
+            cp.cuda.Stream.null.synchronize()
+        elif self.backend == 'mps':
+            torch.mps.synchronize()
+        # CPU doesn't need synchronization
     
     def _morphological_subtraction_3d_cuda(
         self, 
