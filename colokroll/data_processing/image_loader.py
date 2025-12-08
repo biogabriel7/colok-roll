@@ -41,15 +41,13 @@ class ImageLoader:
         self.auto_convert = auto_convert
         self.converter = FormatConverter(preserve_original=True)
         self.converted_files: Dict[str, Path] = {}  # Track converted files
-        self._setup_logging()
+        # Respect host application's logging configuration; avoid reconfiguring root logger
+        logger.setLevel(getattr(logging, self.config.log_level, logging.INFO))
     
-    def _setup_logging(self) -> None:
-        """Setup logging configuration."""
+    def _log_verbose(self, level: int, message: str) -> None:
+        """Helper to log when verbose is enabled."""
         if self.config.verbose:
-            logging.basicConfig(
-                level=getattr(logging, self.config.log_level),
-                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            )
+            logger.log(level, message)
     
     def load_image(self, filepath: Union[str, Path], force_convert: bool = None) -> np.ndarray:
         """Load an image file, automatically handling format conversion.
@@ -181,10 +179,10 @@ class ImageLoader:
                 image = np.take(image, indices=0, axis=t_axis)
                 axes = axes.replace('T', '')
             
-            # Handle unknown 'Q' axes by prompting user
+            # Handle unknown 'Q' axes without interactive prompts
             if 'Q' in axes:
                 logger.warning(f"Unknown axes '{axes}' detected with shape {image.shape}")
-                axes = self._prompt_for_q_axes(axes, image.shape)
+                axes = self._resolve_unknown_axes(axes, image.shape)
                 # Handle T if user specified it for a Q dimension
                 if 'T' in axes:
                     t_axis = axes.index('T')
@@ -289,88 +287,71 @@ class ImageLoader:
             logger.error(f"Failed to load TIFF file: {e}")
             raise ValueError(f"Error loading TIFF file: {e}")
     
-    def _prompt_for_q_axes(self, axes: str, shape: tuple) -> str:
-        """Interactively ask user to identify Q dimensions.
-        
-        Args:
-            axes: Original axes string with Q characters (e.g., 'QQYX')
-            shape: Image shape tuple
-            
-        Returns:
-            Corrected axes string with Q replaced by Z/C/T (e.g., 'ZYXC')
+    def _resolve_unknown_axes(self, axes: str, shape: tuple) -> str:
+        """Resolve unknown axes deterministically without interactive prompts.
+
+        Heuristic:
+        - Two largest dims become Y/X (if not already assigned).
+        - Very small dims (<=10) become C.
+        - Remaining unknowns trigger a clear error instructing the caller to
+          provide axis order or convert to OME-TIFF.
         """
-        print(f"\nUnknown axes '{axes}' detected with shape {shape}")
-        
-        corrected_axes = list(axes)
+        corrected = list(axes)
         q_positions = [i for i, ax in enumerate(axes) if ax == 'Q']
-        
-        # Find the two largest dimensions (these MUST be Y and X)
-        shape_with_idx = [(i, s) for i, s in enumerate(shape)]
-        sorted_by_size = sorted(shape_with_idx, key=lambda x: x[1], reverse=True)
-        largest_indices = [sorted_by_size[i][0] for i in range(min(2, len(sorted_by_size)))]
-        
-        # Validate existing Y/X labels - they should be in the largest dimensions
-        # If not, they're likely mislabeled
-        for i, ax in enumerate(axes):
-            if ax == 'Y' and i not in largest_indices and shape[i] < 100:
-                # Y is mislabeled (too small) - probably should be C or T
-                if shape[i] <= 10:
-                    corrected_axes[i] = 'C'
-                    logger.info(f"Corrected mislabeled Y at position {i} (size {shape[i]}) to C")
-                else:
-                    corrected_axes[i] = 'Q'  # Will prompt for it
-                    q_positions.append(i)
-            elif ax == 'X' and i not in largest_indices and shape[i] < 100:
-                # X is mislabeled (too small)
-                if shape[i] <= 10:
-                    corrected_axes[i] = 'C'
-                    logger.info(f"Corrected mislabeled X at position {i} (size {shape[i]}) to C")
-                else:
-                    corrected_axes[i] = 'Q'  # Will prompt for it
-                    q_positions.append(i)
-        
-        # Now assign Y/X to Q dimensions in largest positions
-        y_assigned = 'Y' in corrected_axes
-        x_assigned = 'X' in corrected_axes
-        
-        # Auto-detect spatial and channel dimensions
-        remaining_q = []
-        for q_idx in q_positions:
-            dim_size = shape[q_idx]
-            
-            # Auto-detect based on size and position heuristics
-            if q_idx in largest_indices and dim_size > 100:
-                # One of the two largest dimensions - must be spatial
+
+        # Identify candidate spatial dims (largest two)
+        sorted_by_size = sorted(enumerate(shape), key=lambda t: t[1], reverse=True)
+        largest_indices = [idx for idx, _ in sorted_by_size[:2]]
+
+        # Re-evaluate any mislabeled small Y/X
+        for i, ax in enumerate(corrected):
+            if ax in ('Y', 'X') and i not in largest_indices and shape[i] < 100:
+                # Treat as unknown for re-assignment
+                corrected[i] = 'Q'
+                q_positions.append(i)
+
+        y_assigned = 'Y' in corrected
+        x_assigned = 'X' in corrected
+        unresolved: List[int] = []
+
+        for pos in q_positions:
+            dim = shape[pos]
+            if pos in largest_indices and dim > 100:
                 if not y_assigned:
-                    corrected_axes[q_idx] = 'Y'
+                    corrected[pos] = 'Y'
                     y_assigned = True
-                    logger.info(f"Auto-detected dimension {q_idx} (size {dim_size}) as Y (spatial)")
                 elif not x_assigned:
-                    corrected_axes[q_idx] = 'X'
+                    corrected[pos] = 'X'
                     x_assigned = True
-                    logger.info(f"Auto-detected dimension {q_idx} (size {dim_size}) as X (spatial)")
                 else:
-                    logger.warning(f"Dimension {q_idx} (size {dim_size}) is spatial but Y/X already assigned")
-                    remaining_q.append(q_idx)
-            elif dim_size <= 10:
-                # Very small dimension - likely channels
-                corrected_axes[q_idx] = 'C'
-                logger.info(f"Auto-detected dimension {q_idx} (size {dim_size}) as C (channels)")
+                    unresolved.append(pos)
+            elif dim <= 10:
+                corrected[pos] = 'C'
             else:
-                # Medium-sized or ambiguous - needs prompting
-                remaining_q.append(q_idx)
-        
-        # Only prompt for remaining non-spatial Q dimensions
-        if remaining_q:
-            error_msg = "Ambiguous dimensions detected. Please manually specify axes or update heuristics.\n"
-            for q_idx in remaining_q:
-                error_msg += f"Dimension {q_idx} (size {shape[q_idx]}) could not be automatically identified.\n"
-            raise ValueError(error_msg)
-        
-        corrected_axes_str = ''.join(corrected_axes)
-        print(f"\n✓ Corrected axes: {axes} → {corrected_axes_str}\n")
-        
-        return corrected_axes_str
+                unresolved.append(pos)
+
+        if not y_assigned or not x_assigned:
+            # Fill remaining spatial dims with largest remaining unknowns
+            for pos in unresolved[:]:
+                if not y_assigned:
+                    corrected[pos] = 'Y'
+                    y_assigned = True
+                    unresolved.remove(pos)
+                elif not x_assigned:
+                    corrected[pos] = 'X'
+                    x_assigned = True
+                    unresolved.remove(pos)
+
+        if unresolved:
+            detail = ", ".join(f"dim{idx}={shape[idx]}" for idx in unresolved)
+            raise ValueError(
+                f"Unable to resolve axes '{axes}' with shape {shape}. "
+                f"Ambiguous dimensions: {detail}. "
+                "Please provide a deterministic axis order (e.g., convert to OME-TIFF) "
+                "or ensure metadata includes valid axes."
+            )
+
+        return ''.join(corrected)
     
     def load_nd2(self, filepath: Union[str, Path]) -> np.ndarray:
         """Load an .nd2 file and extract metadata.

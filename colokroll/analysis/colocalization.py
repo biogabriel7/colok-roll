@@ -246,18 +246,51 @@ def _broadcast_mask_to_z(mask_2d: np.ndarray, z: int) -> np.ndarray:
     return np.broadcast_to(m[np.newaxis, ...], (z, m.shape[0], m.shape[1]))
 
 
-def _safe_corrcoef(a: np.ndarray, b: np.ndarray) -> float:
-    """Compute Pearson correlation coefficient with safety checks."""
+def _safe_corrcoef(
+    a: np.ndarray,
+    b: np.ndarray,
+    *,
+    winsor_clip: Optional[float] = None,
+    min_count: int = 2,
+    min_range: float = 1e-12,
+) -> float:
+    """Compute Pearson correlation coefficient with safety checks.
+
+    Args:
+        a, b: input vectors (any shape, flattened internally)
+        winsor_clip: optional symmetric percentile clip (e.g., 0.1 -> clip to 0.1–99.9 percentiles)
+        min_count: minimum number of finite samples required
+        min_range: treat vectors with range < min_range as constant
+    """
     mod = xp
-    if getattr(a, "size", 0) < 2 or getattr(b, "size", 0) < 2:
+    if getattr(a, "size", 0) < min_count or getattr(b, "size", 0) < min_count:
         return float("nan")
-    a = mod.asarray(a).reshape(-1)
-    b = mod.asarray(b).reshape(-1)
-    # constant-vector guard using range to avoid indexing/reshape pitfalls
+
+    a = mod.asarray(a, dtype=mod.float64).reshape(-1)
+    b = mod.asarray(b, dtype=mod.float64).reshape(-1)
+
+    # Drop non-finite
+    finite_mask = mod.isfinite(a) & mod.isfinite(b)
+    if not bool(mod.any(finite_mask)):
+        return float("nan")
+    a = a[finite_mask]
+    b = b[finite_mask]
+    if a.size < min_count or b.size < min_count:
+        return float("nan")
+
+    # Optional winsorization
+    if winsor_clip is not None and winsor_clip > 0:
+        lower = winsor_clip
+        upper = 100.0 - winsor_clip
+        a = mod.clip(a, mod.percentile(a, lower), mod.percentile(a, upper))
+        b = mod.clip(b, mod.percentile(b, lower), mod.percentile(b, upper))
+
+    # Guard near-constant vectors
     a_range = _to_python_float(mod.max(a) - mod.min(a))
     b_range = _to_python_float(mod.max(b) - mod.min(b))
-    if a_range == 0.0 or b_range == 0.0:
+    if a_range < min_range or b_range < min_range:
         return float("nan")
+
     r = mod.corrcoef(a, b)[0, 1]
     return _to_python_float(r)
 
@@ -628,19 +661,22 @@ def _plot_mask_with_indices(
     kept: List[int],
     removed: List[int],
     title: str = "Mask (labels)",
-    show: bool = True,
-) -> None:
-    """Plot mask with label indices annotated (kept=black, removed=red)."""
+    show: bool = False,
+):
+    """Plot mask with label indices annotated (kept=black, removed=red).
+
+    Returns a Matplotlib Figure; does not call plt.show() unless explicitly requested.
+    """
     try:
         import matplotlib.pyplot as plt  # type: ignore
     except ImportError as e:
         logger.warning(f"matplotlib not available; skipping plot: {e}")
-        return
+        return None
 
-    plt.figure(figsize=(6, 6))
-    plt.imshow(mask_original, cmap="tab20")
-    plt.axis("off")
-    plt.title(title)
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.imshow(mask_original, cmap="tab20")
+    ax.axis("off")
+    ax.set_title(title)
 
     labels = [int(l) for l in np.unique(mask_original) if l != 0]
     removed_set = set(removed)
@@ -651,14 +687,16 @@ def _plot_mask_with_indices(
         y = float(ys.mean())
         x = float(xs.mean())
         color = "red" if l in removed_set else "black"
-        plt.text(x, y, str(l), color=color, fontsize=10, ha="center", va="center")
+        ax.text(x, y, str(l), color=color, fontsize=10, ha="center", va="center")
     if show:
         plt.show()
-        logger.info(
-            "Displayed mask with label indices (kept=%d, removed=%d)",
-            len(kept),
-            len(removed),
-        )
+    logger.info(
+        "Prepared mask plot (kept=%d, removed=%d, show=%s)",
+        len(kept),
+        len(removed),
+        show,
+    )
+    return fig
 
 
 def compute_colocalization(
@@ -667,7 +705,7 @@ def compute_colocalization(
     channel_a: Union[int, str],
     channel_b: Union[int, str],
     *,
-    normalization_scope: str = "none",  # default to none to avoid affecting thresholds
+    normalization_scope: str = "none",  # deprecated: raw domain is enforced
     thresholding: str = "none",  # 'none'|'otsu'|'costes'|'fixed'
     fixed_thresholds: Optional[Tuple[float, float]] = None,  # used if thresholding='fixed' -> (t_a, t_b)
     channel_names: Optional[List[str]] = None,
@@ -676,12 +714,19 @@ def compute_colocalization(
     min_area_fraction: float = 0.7,  # fraction of median area when min_area="auto"
     max_border_fraction: Optional[float] = None,
     border_margin_px: int = 1,
-    plot_mask: bool = True,
+    drop_label_1: bool = True,
+    plot_mask: bool = False,
+    plot_mask_save: Optional[Union[str, Path]] = None,
     # Preprocessing controls
     bleedthrough_matrix: Optional[List[List[float]]] = None,
     background_subtract: Optional[Dict[str, Any]] = None,  # {"percentile": 1.0}
     # Threshold domain selection
-    threshold_domain: str = "raw",  # 'raw'|'normalized'
+    threshold_domain: str = "raw",  # enforced to raw for consistency
+    # Aggregation controls
+    manders_weighting: str = "voxel",  # 'voxel' (global) or 'slice' (legacy mean of per-z)
+    pearson_winsor_clip: Optional[float] = None,  # symmetric percentile clip for Pearson (e.g., 0.1)
+    pearson_min_count: int = 2,
+    pearson_min_range: float = 1e-12,
     # Output options
     output_json: Optional[Union[str, Path]] = None,  # save results to JSON if provided
 ) -> Dict[str, Any]:
@@ -704,6 +749,20 @@ def compute_colocalization(
     mask_2d = _load_mask(mask)
     
     # Auto-estimate min_area from mask if requested
+    if normalization_scope.lower() != "none":
+        logger.warning(
+            "normalization_scope is deprecated; raw intensities are always used. "
+            "Provided value '%s' will be ignored.",
+            normalization_scope,
+        )
+
+    if threshold_domain.lower() != "raw":
+        logger.warning(
+            "threshold_domain is forced to 'raw' for all metrics. Provided value '%s' will be ignored.",
+            threshold_domain,
+        )
+        threshold_domain = "raw"
+
     if min_area == "auto":
         min_area = estimate_min_area_threshold(mask_2d, fraction_of_median=min_area_fraction)
         logger.info(f"Auto-estimated min_area threshold: {min_area} (fraction={min_area_fraction})")
@@ -728,7 +787,8 @@ def compute_colocalization(
         int(len(np.unique(mask_2d)) - (1 if np.any(mask_2d == 0) else 0)),
     )
     logger.info(
-        "Manders coefficients (M1/M2) will be computed per-Z-slice with independent thresholds (thresholding=%s), then averaged across %d Z-slices",
+        "Manders coefficients (M1/M2) weighting: %s (thresholding=%s, z-slices=%d)",
+        manders_weighting,
         thresholding,
         img.shape[0],
     )
@@ -741,9 +801,12 @@ def compute_colocalization(
     
     # Automatically remove label 1 (background in Cellpose)
     has_label_1 = np.any(mask_2d == 1)
-    if has_label_1:
+    if has_label_1 and drop_label_1:
         mask_2d[mask_2d == 1] = 0
-        logger.info("Automatically removed label 1 (background) from mask")
+        logger.warning(
+            "Removed label 1 from mask (assumed background, e.g., Cellpose). "
+            "Set drop_label_1=False to keep it."
+        )
 
     # Optional filtering BEFORE normalization/metrics
     filter_info: Dict[str, Any] = {
@@ -751,7 +814,7 @@ def compute_colocalization(
         "max_border_fraction": None if max_border_fraction is None else float(max_border_fraction),
         "border_margin_px": int(border_margin_px),
         "kept_labels": [int(l) for l in np.unique(mask_2d) if l > 1],  # Exclude 0 (background) and 1 (already removed)
-        "removed_labels": [1] if has_label_1 else [],  # Label 1 is automatically removed as background
+        "removed_labels": [1] if (has_label_1 and drop_label_1) else [],
     }
     if min_area > 0 or max_border_fraction is not None:
         mask_2d, filter_info = _filter_labels(
@@ -768,13 +831,24 @@ def compute_colocalization(
 
     # Optional visualization of labels (kept=black, removed=red)
     if plot_mask:
-        _plot_mask_with_indices(
+        fig = _plot_mask_with_indices(
             mask_original,
             kept=filter_info.get("kept_labels", []),
             removed=filter_info.get("removed_labels", []),
             title="Mask (labels)",
-            show=True,
+            show=False,
         )
+        if fig is not None and plot_mask_save is not None:
+            plot_path = Path(plot_mask_save)
+            plot_path.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(plot_path, bbox_inches="tight")
+            filter_info["mask_plot_path"] = str(plot_path)
+        elif fig is not None:
+            try:
+                import matplotlib.pyplot as plt  # type: ignore
+                plt.close(fig)
+            except Exception:
+                pass
 
     # Build union mask (labels>0) AFTER filtering
     union_mask = (mask_2d > 0)
@@ -792,30 +866,8 @@ def compute_colocalization(
         perc = float(background_subtract.get("percentile", 1.0))
         img = subtract_background_percentile_roi(img, union_mask, percentile=perc)  # type: ignore[arg-type]
 
-    # Collect vectors for normalization
-    if normalization_scope == "mask":
-        a_all, b_all = _extract_channel_vectors(img, ch_a, ch_b, union_mask)
-    elif normalization_scope == "global":
-        # all ZYX
-        z, h, w, _ = img.shape
-        all_true = np.ones((h, w), dtype=bool)
-        a_all, b_all = _extract_channel_vectors(img, ch_a, ch_b, all_true)
-    elif normalization_scope == "none":
-        a_all = b_all = None  # type: ignore
-    else:
-        raise ValueError("normalization_scope must be one of {'mask','global','none'}")
-
-    # Fit scalers (if enabled)
-    if normalization_scope != "none":
-        a_mm, b_mm = _fit_minmax(a_all, b_all)  # type: ignore[arg-type]
-        logger.info(
-            "Normalization fitted (scope=%s) on %d voxels per channel",
-            normalization_scope,
-            int(a_all.size) if hasattr(a_all, "size") else 0,
-        )
-    else:
-        a_mm = b_mm = None  # type: ignore
-        logger.info("Normalization disabled (scope='none')")
+    # Normalization is deprecated; metrics use raw values
+    a_mm = b_mm = None  # type: ignore
 
     # Helper to compute metrics for a boolean ROI (2D)
     def metrics_for_roi(roi_2d: np.ndarray) -> Dict[str, float]:
@@ -839,15 +891,26 @@ def compute_colocalization(
             a_norm, b_norm = a_raw, b_raw
 
         # Pearson, overlap, and Jaccard computed on all Z-slices together
-        r = _safe_corrcoef(a_norm, b_norm)
+        r = _safe_corrcoef(
+            a_norm,
+            b_norm,
+            winsor_clip=pearson_winsor_clip,
+            min_count=pearson_min_count,
+            min_range=pearson_min_range,
+        )
         ov = _overlap_coefficient(a_norm, b_norm)
         jac = _jaccard_on_positive(a_norm, b_norm)
 
-        # Manders computed per Z-slice with independent thresholds, then averaged
+        # Manders computed per Z-slice with independent thresholds
         num_z = img.shape[0]
         m1_per_z = []
         m2_per_z = []
         thresholds_per_z = []
+        voxel_weights = []
+        sum_a_over_b = 0.0
+        sum_b_over_a = 0.0
+        total_a = float(np.sum(a_tsrc := a_raw))  # type: ignore[assignment]
+        total_b = float(np.sum(b_tsrc := b_raw))  # type: ignore[assignment]
         
         for z_idx in range(num_z):
             a_raw_z, b_raw_z = _extract_channel_vectors_single_z(img, ch_a, ch_b, roi_2d, z_idx)
@@ -876,15 +939,26 @@ def compute_colocalization(
             m1_z, m2_z = _manders_m1_m2(a_tsrc_z, b_tsrc_z, t_a=t_a_z, t_b=t_b_z)
             m1_per_z.append(m1_z)
             m2_per_z.append(m2_z)
+            voxel_weights.append(int(a_tsrc_z.size))
+
+            # Accumulate voxel-weighted numerators for global M1/M2
+            sum_a_over_b += float(np.sum(a_tsrc_z[b_tsrc_z > (t_b_z if t_b_z is not None else 0)]))
+            sum_b_over_a += float(np.sum(b_tsrc_z[a_tsrc_z > (t_a_z if t_a_z is not None else 0)]))
             thresholds_per_z.append({
                 "z": z_idx,
                 "t_a": None if t_a_z is None else float(t_a_z),
                 "t_b": None if t_b_z is None else float(t_b_z),
             })
         
-        # Average Manders across Z-slices
-        m1 = float(np.nanmean(m1_per_z)) if m1_per_z else float("nan")
-        m2 = float(np.nanmean(m2_per_z)) if m2_per_z else float("nan")
+        # Aggregate Manders
+        if manders_weighting == "slice":
+            m1 = float(np.nanmean(m1_per_z)) if m1_per_z else float("nan")
+            m2 = float(np.nanmean(m2_per_z)) if m2_per_z else float("nan")
+        elif manders_weighting == "voxel":
+            m1 = sum_a_over_b / total_a if total_a > 0 else float("nan")
+            m2 = sum_b_over_a / total_b if total_b > 0 else float("nan")
+        else:
+            raise ValueError("manders_weighting must be one of {'voxel','slice'}")
 
         return {
             "pearson_r": float(r),
@@ -892,6 +966,7 @@ def compute_colocalization(
             "manders_m2": float(m2),
             "manders_m1_per_z": [float(x) for x in m1_per_z],
             "manders_m2_per_z": [float(x) for x in m2_per_z],
+            "manders_weighting": manders_weighting,
             "overlap_r": float(ov),
             "jaccard": float(jac),
             # number of voxels used in this ROI (use channel vector length)

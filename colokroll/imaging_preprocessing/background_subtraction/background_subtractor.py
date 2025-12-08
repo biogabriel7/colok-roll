@@ -20,8 +20,6 @@ from typing import Dict, Any, Optional, Tuple, List
 import gc
 
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.figure import Figure
 from skimage import filters, morphology
 
 from ...core.config import BackgroundSubtractionConfig, PreprocessingConfig
@@ -29,39 +27,62 @@ from ...core.utils import convert_microns_to_pixels
 from ...data_processing.image_loader import ImageLoader
 from .auto_bg_config import AUTO_BG_CONFIG
 
-# Try to import CUDA libraries
-try:
-    import cupy as cp
-    import cupyx.scipy.ndimage as cp_ndimage
-    CUDA_AVAILABLE = True
-except ImportError:
-    CUDA_AVAILABLE = False
-    cp = None
-    cp_ndimage = None
+from typing import TYPE_CHECKING
 
-# Try to import MPS libraries (PyTorch + kornia for Apple Silicon)
-try:
-    import torch
-    import kornia
-    MPS_AVAILABLE = torch.backends.mps.is_available() and torch.backends.mps.is_built()
-except ImportError:
-    MPS_AVAILABLE = False
-    torch = None
-    kornia = None
+# Optional backends are lazy-loaded to keep imports light
+CUDA_AVAILABLE = False
+cp = None
+cp_ndimage = None
+
+MPS_AVAILABLE = False
+torch = None
+kornia = None
 
 # CPU fallback is always available via scipy
 from scipy import ndimage as sp_ndimage
 CPU_AVAILABLE = True
 
+if TYPE_CHECKING:
+    from matplotlib.figure import Figure
+
 logger = logging.getLogger(__name__)
 
-# Log available backends
-if CUDA_AVAILABLE:
-    logger.info("CUDA (CuPy) available - GPU acceleration enabled")
-elif MPS_AVAILABLE:
-    logger.info("MPS (Apple Silicon) available - GPU acceleration enabled via PyTorch")
-else:
-    logger.info("No GPU available - using CPU (SciPy) backend")
+def _ensure_cuda() -> bool:
+    """Lazy-load CUDA dependencies."""
+    global cp, cp_ndimage, CUDA_AVAILABLE
+    if CUDA_AVAILABLE:
+        return True
+    try:
+        import cupy as _cp  # type: ignore
+        import cupyx.scipy.ndimage as _cp_ndimage  # type: ignore
+
+        cp = _cp
+        cp_ndimage = _cp_ndimage
+        CUDA_AVAILABLE = True
+    except ImportError:
+        CUDA_AVAILABLE = False
+    return CUDA_AVAILABLE
+
+
+def _ensure_mps() -> bool:
+    """Lazy-load MPS (PyTorch + kornia) dependencies."""
+    global torch, kornia, MPS_AVAILABLE
+    if MPS_AVAILABLE:
+        return True
+    try:
+        import torch as _torch  # type: ignore
+
+        if not (_torch.backends.mps.is_available() and _torch.backends.mps.is_built()):
+            return False
+
+        import kornia as _kornia  # type: ignore
+
+        torch = _torch
+        kornia = _kornia
+        MPS_AVAILABLE = True
+    except ImportError:
+        MPS_AVAILABLE = False
+    return MPS_AVAILABLE
 
 
 class BackgroundSubtractor:
@@ -119,31 +140,33 @@ class BackgroundSubtractor:
         """Select the best available backend."""
         # Explicit CUDA request
         if use_cuda is True:
-            if CUDA_AVAILABLE:
+            if _ensure_cuda():
                 return 'cuda'
             else:
-                raise RuntimeError("CUDA requested but not available")
+                raise RuntimeError("CUDA requested but CuPy is not available")
         
         # Explicit MPS request
         if use_mps is True:
-            if MPS_AVAILABLE:
+            if _ensure_mps():
                 return 'mps'
             else:
-                raise RuntimeError("MPS requested but not available")
+                raise RuntimeError("MPS requested but PyTorch MPS backend is not available")
         
         # Explicit disable
         if use_cuda is False and use_mps is False:
             return 'cpu'
         
         # Auto-detect: prefer CUDA > MPS > CPU
-        if CUDA_AVAILABLE and use_cuda is not False:
+        if use_cuda is not False and _ensure_cuda():
             return 'cuda'
-        if MPS_AVAILABLE and use_mps is not False:
+        if use_mps is not False and _ensure_mps():
             return 'mps'
         return 'cpu'
     
     def _initialize_mps(self) -> None:
         """Initialize MPS (Metal Performance Shaders) for Apple Silicon."""
+        if not _ensure_mps():
+            raise RuntimeError("MPS backend requested but dependencies are unavailable")
         self.device = torch.device('mps')
         self.logger.info(f"MPS device initialized: {self.device}")
         # MPS doesn't have memory query like CUDA, estimate conservatively
@@ -158,6 +181,8 @@ class BackgroundSubtractor:
     
     def _initialize_cuda(self) -> None:
         """Initialize CUDA context and check GPU memory."""
+        if not _ensure_cuda():
+            raise RuntimeError("CUDA backend requested but dependencies are unavailable")
         try:
             # Get GPU info
             mempool = cp.get_default_memory_pool()
@@ -231,6 +256,10 @@ class BackgroundSubtractor:
         **kwargs
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """CUDA-accelerated background subtraction."""
+        if not _ensure_cuda():
+            raise RuntimeError("CUDA backend selected but CuPy is unavailable")
+        if cp_ndimage is None:
+            raise RuntimeError("CuPy ndimage module not available; reinstall cupy/cupyx")
         try:
             # Check if image fits in GPU memory
             image_memory_gb = image.nbytes / (1024**3)
@@ -732,6 +761,10 @@ class BackgroundSubtractor:
         **kwargs
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """MPS-accelerated background subtraction using PyTorch + kornia."""
+        if not _ensure_mps():
+            raise RuntimeError("MPS backend selected but PyTorch/kornia are unavailable")
+        if kornia is None or torch is None:
+            raise RuntimeError("MPS dependencies missing; install torch with MPS and kornia")
         params = self._get_method_parameters(method, channel_name, pixel_size, **kwargs)
         
         # Convert to PyTorch tensor on MPS
@@ -984,6 +1017,8 @@ class BackgroundSubtractor:
     
     def _create_disk_selem_cuda(self, radius: int) -> cp.ndarray:
         """Create disk-shaped structuring element on GPU."""
+        if not _ensure_cuda():
+            raise RuntimeError("CUDA dependencies not available for structuring element creation")
         # Create disk on CPU first (small operation)
         cpu_disk = morphology.disk(radius)
         # Transfer to GPU
@@ -1227,9 +1262,9 @@ class BackgroundSubtractor:
     
     def _sync_backend(self) -> None:
         """Synchronize the current backend (wait for GPU operations to complete)."""
-        if self.backend == 'cuda':
+        if self.backend == 'cuda' and _ensure_cuda():
             cp.cuda.Stream.null.synchronize()
-        elif self.backend == 'mps':
+        elif self.backend == 'mps' and _ensure_mps():
             torch.mps.synchronize()
         # CPU doesn't need synchronization
     
@@ -1470,6 +1505,12 @@ class BackgroundSubtractor:
             >>> results2 = {"DAPI": bg_subtractor.subtract_background(data, radius=100, ...)}
             >>> # Plot each separately to compare
         """
+        try:
+            import matplotlib.pyplot as plt  # type: ignore
+        except ImportError as exc:
+            self.logger.warning("matplotlib not available; cannot generate comparison plot: %s", exc)
+            return None  # type: ignore[return-value]
+
         if z_slice is None:
             z_slice = original_data.shape[0] // 2
         
@@ -1601,6 +1642,12 @@ class BackgroundSubtractor:
             ...     loaded_data, "DAPI", 0, parameter_sets, pixel_size
             ... )
         """
+        try:
+            import matplotlib.pyplot as plt  # type: ignore
+        except ImportError as exc:
+            self.logger.warning("matplotlib not available; cannot generate comparison plot: %s", exc)
+            return None  # type: ignore[return-value]
+
         if z_slice is None:
             z_slice = original_data.shape[0] // 2
         
@@ -1680,7 +1727,7 @@ class BackgroundSubtractor:
     
     def get_gpu_info(self) -> Dict[str, Any]:
         """Get information about GPU availability and memory."""
-        if not self.use_cuda:
+        if not self.use_cuda or not _ensure_cuda():
             return {
                 'cuda_available': False,
                 'gpu_accelerated': False,
