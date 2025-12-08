@@ -233,6 +233,9 @@ class CellSegmenter:
         channel_indices: Tuple[int, int],
         channel_weights: Tuple[float, float] = (0.8, 0.2),
         save_basename: Optional[str] = None,
+        *,
+        plot: bool = True,
+        plot_save_path: Optional[Union[str, Path]] = None,
     ) -> CellposeResult:
         """Run segmentation given an image array.
 
@@ -241,6 +244,9 @@ class CellSegmenter:
             channel_indices: Two channel indices to use for composite (A, B).
             channel_weights: Weights applied to channels (wA, wB).
             save_basename: If provided, writes outputs into output_dir with this stem.
+            plot: If True, create a quicklook segmentation plot (composite, overlay, mask).
+            plot_save_path: Optional path to save the plot. If None and output_dir is set,
+                saves next to mask/outlines with suffix "_segmentation_preview.png".
         """
         png_path = self._build_composite_image(
             image,
@@ -319,6 +325,21 @@ class CellSegmenter:
             masks_tif = dst_mask
             outlines_png = dst_outl
 
+        # Optional quicklook plot
+        if plot:
+            try:
+                self._plot_segmentation_quicklook(
+                    image,
+                    mask_array,
+                    channel_indices=channel_indices,
+                    channel_weights=channel_weights,
+                    save_path=plot_save_path or (
+                        (self.output_dir / f"{stem}_segmentation_preview.png") if (self.output_dir is not None) else None
+                    ),
+                )
+            except Exception as e:  # noqa: BLE001
+                self._logger.warning("Segmentation quicklook plot failed: %s", e)
+
         return CellposeResult(mask_path=masks_tif, outlines_path=outlines_png, mask_array=mask_array)
 
     def segment_from_file(
@@ -333,6 +354,8 @@ class CellSegmenter:
         output_format: str = "png8",
         percentiles: Tuple[float, float] = (1.0, 99.9),
         apply_clahe: bool = False,
+        plot: bool = True,
+        plot_save_path: Optional[Union[str, Path]] = None,
     ) -> CellposeResult:
         """Load an OME-TIFF, build composite from selected channels, run Cellpose.
 
@@ -431,7 +454,82 @@ class CellSegmenter:
             masks_tif = dst_mask
             outlines_png = dst_outl
 
+        # Optional quicklook plot
+        if plot:
+            try:
+                self._plot_segmentation_quicklook(
+                    image,
+                    mask_array,
+                    channel_indices=(ch_a, ch_b),
+                    channel_weights=channel_weights,
+                    save_path=plot_save_path or (
+                        (self.output_dir / f"{basename}_segmentation_preview.png") if (self.output_dir is not None) else None
+                    ),
+                )
+            except Exception as e:  # noqa: BLE001
+                self._logger.warning("Segmentation quicklook plot failed: %s", e)
+
         return CellposeResult(mask_path=masks_tif, outlines_path=outlines_png, mask_array=mask_array)
+
+    def _plot_segmentation_quicklook(
+        self,
+        image: np.ndarray,
+        mask: np.ndarray,
+        *,
+        channel_indices: Tuple[int, int],
+        channel_weights: Tuple[float, float] = (0.8, 0.2),
+        save_path: Optional[Union[str, Path]] = None,
+    ) -> None:
+        """Lightweight segmentation visualization (composite, overlay, mask)."""
+        try:
+            import matplotlib.pyplot as plt  # type: ignore
+        except Exception:
+            self._logger.debug("matplotlib not available; skipping segmentation plot")
+            return
+
+        if image.ndim == 3:
+            image = image[..., np.newaxis]
+        mip_creator = MIPCreator()
+        mip = mip_creator.create_mip(image, method="max")
+
+        ch_a, ch_b = channel_indices
+        a2d = _normalize_to_unit_interval(mip[..., ch_a])
+        b2d = _normalize_to_unit_interval(mip[..., ch_b])
+
+        # Simple RGB composite: A->red, B->green (weights applied before clamp)
+        comp = np.zeros((*a2d.shape, 3), dtype=np.float32)
+        comp[..., 0] = np.clip(channel_weights[0] * a2d, 0.0, 1.0)
+        comp[..., 1] = np.clip(channel_weights[1] * b2d, 0.0, 1.0)
+
+        mask_bool = mask > 0
+        overlay = comp.copy()
+        overlay[mask_bool] = 0.6 * overlay[mask_bool] + 0.4 * np.array([1.0, 1.0, 0.0], dtype=np.float32)
+
+        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+        axes[0].imshow(comp)
+        axes[0].set_title("Composite (A/B)")
+        axes[0].axis("off")
+
+        axes[1].imshow(overlay)
+        axes[1].set_title("Overlay with mask")
+        axes[1].axis("off")
+
+        axes[2].imshow(mask, cmap="nipy_spectral")
+        axes[2].set_title("Mask labels")
+        axes[2].axis("off")
+
+        plt.tight_layout()
+        if save_path is not None:
+            save_path = Path(save_path)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(save_path, dpi=150, bbox_inches="tight")
+            self._logger.info("Segmentation preview saved to %s", str(save_path))
+            plt.close(fig)
+        else:
+            try:
+                plt.show(block=False)
+            except Exception:
+                pass
 
     def segment_from_results(
         self,

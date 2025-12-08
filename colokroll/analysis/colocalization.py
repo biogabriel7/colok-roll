@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -58,6 +59,56 @@ def _to_python_float(val) -> float:
     return float(val)
 
 logger = logging.getLogger(__name__)
+
+
+def _percentile_backend(vals: np.ndarray, q: float) -> float:
+    """Backend-agnostic percentile to Python float."""
+    mod = xp
+    return _to_python_float(mod.percentile(vals, q))
+
+
+def _finite(vals: np.ndarray) -> np.ndarray:
+    """Return finite-only values (preserves backend)."""
+    mod = xp
+    arr = mod.asarray(vals)
+    return arr[mod.isfinite(arr)]
+
+
+def _winsorize(vals: np.ndarray, clip: Optional[float]) -> np.ndarray:
+    """Symmetric percentile clip."""
+    if clip is None or clip <= 0:
+        return vals
+    lower = clip
+    upper = 100.0 - clip
+    lo = _percentile_backend(vals, lower)
+    hi = _percentile_backend(vals, upper)
+    return xp.clip(vals, lo, hi)
+
+
+def _resolve_thresholds_for_binarization(
+    a: np.ndarray,
+    b: np.ndarray,
+    *,
+    strategy: str,
+    thresholds: Optional[Tuple[float, float]] = None,
+    percentile: float = 99.0,
+) -> Tuple[float, float]:
+    """Select per-channel thresholds for binarization."""
+    if strategy == "positive":
+        return 0.0, 0.0
+    elif strategy == "otsu":
+        return _otsu_threshold_1d(a), _otsu_threshold_1d(b)
+    elif strategy == "percentile":
+        return (
+            _percentile_backend(a, percentile),
+            _percentile_backend(b, percentile),
+        )
+    elif strategy == "fixed":
+        if not thresholds:
+            raise ValueError("thresholds must be provided when strategy='fixed'")
+        return float(thresholds[0]), float(thresholds[1])
+    else:
+        raise ValueError("strategy must be one of {'positive','otsu','percentile','fixed'}")
 
 
 def _as_zyxc(image: np.ndarray) -> np.ndarray:
@@ -252,17 +303,27 @@ def _safe_corrcoef(
     *,
     winsor_clip: Optional[float] = None,
     min_count: int = 2,
+    min_finite: Optional[int] = None,
+    min_abs: int = 0,
+    min_fraction: float = 0.0,
+    return_meta: bool = False,
     min_range: float = 1e-12,
-) -> float:
+) -> Union[float, Tuple[float, Dict[str, Any]]]:
     """Compute Pearson correlation coefficient with safety checks.
 
     Args:
         a, b: input vectors (any shape, flattened internally)
         winsor_clip: optional symmetric percentile clip (e.g., 0.1 -> clip to 0.1–99.9 percentiles)
-        min_count: minimum number of finite samples required
+        min_count: minimum number of finite samples required (pre-mask size guard)
+        min_finite: minimum number of finite, post-mask samples required (defaults to min_count)
+        min_abs: absolute minimum number of finite, post-mask samples
+        min_fraction: minimum fraction of finite, post-mask samples (of available finite)
+        return_meta: if True, return (r, meta) with support info
         min_range: treat vectors with range < min_range as constant
     """
     mod = xp
+    if min_finite is None:
+        min_finite = min_count
     if getattr(a, "size", 0) < min_count or getattr(b, "size", 0) < min_count:
         return float("nan")
 
@@ -272,27 +333,45 @@ def _safe_corrcoef(
     # Drop non-finite
     finite_mask = mod.isfinite(a) & mod.isfinite(b)
     if not bool(mod.any(finite_mask)):
-        return float("nan")
+        return (float("nan"), {"n": 0, "required": int(min_finite), "low_support": True, "ci95": None}) if return_meta else float("nan")
     a = a[finite_mask]
     b = b[finite_mask]
-    if a.size < min_count or b.size < min_count:
-        return float("nan")
+    n_finite = int(a.size)
+    required = int(max(min_finite, min_abs, math.ceil(float(min_fraction) * float(n_finite))))
+    if n_finite < required:
+        result = float("nan")
+        meta = {"n": n_finite, "required": required, "low_support": True, "ci95": None}
+        return (result, meta) if return_meta else result
 
     # Optional winsorization
     if winsor_clip is not None and winsor_clip > 0:
-        lower = winsor_clip
-        upper = 100.0 - winsor_clip
-        a = mod.clip(a, mod.percentile(a, lower), mod.percentile(a, upper))
-        b = mod.clip(b, mod.percentile(b, lower), mod.percentile(b, upper))
+        a = _winsorize(a, winsor_clip)
+        b = _winsorize(b, winsor_clip)
 
     # Guard near-constant vectors
     a_range = _to_python_float(mod.max(a) - mod.min(a))
     b_range = _to_python_float(mod.max(b) - mod.min(b))
     if a_range < min_range or b_range < min_range:
-        return float("nan")
+        return (float("nan"), {"n": n_finite, "required": required, "low_support": True, "ci95": None}) if return_meta else float("nan")
 
-    r = mod.corrcoef(a, b)[0, 1]
-    return _to_python_float(r)
+    r = _to_python_float(mod.corrcoef(a, b)[0, 1])
+
+    # Approximate 95% CI via Fisher z when sample is sufficient
+    ci95 = None
+    if n_finite > 10 and abs(r) < 1.0:
+        try:
+            z = 0.5 * math.log((1 + r) / (1 - r))
+            se = 1.0 / math.sqrt(n_finite - 3)
+            z_lo = z - 1.96 * se
+            z_hi = z + 1.96 * se
+            ci95 = (math.tanh(z_lo), math.tanh(z_hi))
+        except Exception:
+            ci95 = None
+
+    # Flag low support when close to the required threshold
+    low_support = n_finite < required * 1.1
+    meta = {"n": n_finite, "required": required, "low_support": bool(low_support), "ci95": ci95}
+    return (r, meta) if return_meta else r
 
 
 def _overlap_coefficient(a: np.ndarray, b: np.ndarray) -> float:
@@ -331,13 +410,55 @@ def _manders_m1_m2(
     return m1, m2
 
 
-def _jaccard_on_positive(a: np.ndarray, b: np.ndarray) -> float:
-    """Compute Jaccard index on positive (>0) regions."""
+def _jaccard_on_positive(
+    a: np.ndarray,
+    b: np.ndarray,
+    *,
+    thresholding: str = "positive",  # 'positive'|'otsu'|'percentile'|'fixed'
+    thresholds: Optional[Tuple[float, float]] = None,
+    percentile: float = 99.0,
+    min_union: int = 1,
+    min_union_fraction: float = 0.0,
+) -> float:
+    """
+    Compute Jaccard index with configurable binarization and minimum support.
+
+    Args:
+        a, b: input arrays (any shape, flattened internally)
+        thresholding: strategy for binarization
+            - 'positive': >0 (legacy behavior)
+            - 'otsu': per-channel Otsu thresholds
+            - 'percentile': per-channel percentile (e.g., 99.0)
+            - 'fixed': use provided thresholds (thresholds=(t_a, t_b))
+        thresholds: tuple of (t_a, t_b) used when thresholding='fixed'
+        percentile: percentile for thresholding='percentile'
+        min_union: absolute minimum number of union voxels required
+        min_union_fraction: minimum fraction (of total voxels) required for the union
+    """
     mod = xp
-    a_bin = a > 0
-    b_bin = b > 0
-    inter = _to_python_float(mod.sum(a_bin & b_bin))
+
+    a_f = _finite(a)
+    b_f = _finite(b)
+    if a_f.size == 0 or b_f.size == 0:
+        return float("nan")
+
+    t_a, t_b = _resolve_thresholds_for_binarization(
+        a_f,
+        b_f,
+        strategy=thresholding,
+        thresholds=thresholds,
+        percentile=percentile,
+    )
+
+    a_bin = a > t_a
+    b_bin = b > t_b
+
     union = _to_python_float(mod.sum(a_bin | b_bin))
+    required = max(int(min_union), int(math.ceil(float(min_union_fraction) * float(a_bin.size))))
+    if union < required:
+        return float("nan")
+
+    inter = _to_python_float(mod.sum(a_bin & b_bin))
     return inter / union if union > 0 else float("nan")
 
 
@@ -458,69 +579,114 @@ def _costes_thresholds(
     a: np.ndarray,
     b: np.ndarray,
     *,
-    steps: int = _COSTES_STEPS,
+    steps: int = _COSTES_STEPS,  # kept for backward compatibility (coarse grid not linear anymore)
     min_points: int = _COSTES_MIN_POINTS,
+    winsor_clip: Optional[float] = 0.5,
+    coarse_percentiles: Tuple[float, float, float] = (5.0, 95.0, 10.0),
+    percentile_bounds: Tuple[float, float] = (0.1, 99.9),
+    refine_steps: int = 8,
 ) -> Tuple[float, float]:
     """
-    Compute Costes automatic thresholds for two vectors a, b.
+    Compute Costes automatic thresholds for two vectors a, b using an adaptive,
+    percentile-driven search that minimizes |r| (preferring r<=0) while
+    respecting a minimum voxel count.
 
-    Strategy (pragmatic implementation):
-    - Fit linear regression b ~= s * a + c over all voxels in ROI.
-    - Descend a-threshold from max(a) to min(a) in 'steps'.
-    - For each t_a, set t_b = s * t_a + c (clipped to b-range).
-    - Select the largest thresholds where Pearson(a<=t_a, b<=t_b) <= 0
-      with at least 'min_points' voxels; otherwise choose the pair with
-      Pearson closest to 0 from the positive side.
+    Strategy (robust implementation):
+    - Optional winsor clip to reduce outlier influence on regression and r.
+    - Use percentile bounds (default 0.1–99.9) to avoid empty tails.
+    - Fit linear regression b ~= s * a + c on the clipped data.
+    - Evaluate a coarse grid of t_a built from percentiles (e.g., 5–95%).
+    - For each candidate, set t_b = s * t_a + c (clipped into percentile bounds),
+      require at least min_points voxels, and select the pair minimizing |r|
+      with preference for r <= 0.
+    - Refine around the best coarse candidate with a small fine grid.
     
     Args:
         a: First channel intensity vector.
         b: Second channel intensity vector.
-        steps: Number of threshold steps to search.
+        steps: Deprecated; kept for backward compatibility (ignored for grid).
         min_points: Minimum number of points required for correlation.
+        winsor_clip: Optional symmetric percentile clip applied before regression and search.
+        coarse_percentiles: (start, stop, step) percentiles for coarse grid of t_a.
+        percentile_bounds: Lower/upper percentiles defining the effective min/max bounds.
+        refine_steps: Number of refinement samples near the best coarse t_a.
     
     Returns:
         Tuple of (threshold_a, threshold_b).
     """
     mod = xp
-    a_f = a[mod.isfinite(a)]
-    b_f = b[mod.isfinite(b)]
+
+    # Finite-only vectors
+    a_f = _finite(a)
+    b_f = _finite(b)
     if a_f.size == 0 or b_f.size == 0:
         return float("nan"), float("nan")
-    a_min = _to_python_float(mod.min(a_f))
-    a_max = _to_python_float(mod.max(a_f))
-    b_min = _to_python_float(mod.min(b_f))
-    b_max = _to_python_float(mod.max(b_f))
-    if a_max <= a_min or b_max <= b_min:
-        return a_min, b_min
 
+    # Optional winsorization to reduce outlier influence
+    if winsor_clip is not None and winsor_clip > 0:
+        a_f = _winsorize(a_f, winsor_clip)
+        b_f = _winsorize(b_f, winsor_clip)
+
+    # Effective bounds to avoid empty tails
+    a_min = _percentile_backend(a_f, percentile_bounds[0])
+    a_max = _percentile_backend(a_f, percentile_bounds[1])
+    b_min = _percentile_backend(b_f, percentile_bounds[0])
+    b_max = _percentile_backend(b_f, percentile_bounds[1])
+    if a_max <= a_min or b_max <= b_min:
+        return float(a_min), float(b_min)
+
+    # Robust-ish regression on clipped data
     slope, intercept = _linear_regression_slope_intercept(a_f, b_f)
 
-    best_ta = a_min
-    best_tb = b_min
-    best_r = float("inf")
-
-    for k in range(steps, 0, -1):
-        t_a = a_min + (a_max - a_min) * (k / steps)
+    def evaluate(t_a: float) -> Optional[Tuple[int, float, float, float, float, int]]:
+        """Return (pref_nonpos, abs_r, r, t_a, t_b, n) or None if invalid."""
         t_b = slope * t_a + intercept
-        # clip into observed range
         t_b = max(b_min, min(b_max, t_b))
         mask = (a <= t_a) & (b <= t_b)
-        if int(xp.count_nonzero(mask)) < min_points:
-            continue
+        n = int(mod.count_nonzero(mask))
+        if n < min_points:
+            return None
         r_bg = _safe_corrcoef(a[mask], b[mask])
         if np.isnan(r_bg):
-            continue
-        if r_bg <= 0.0:
-            best_ta = t_a
-            best_tb = t_b
-            best_r = r_bg
-            break
-        # Track smallest positive r to fall back to
-        if r_bg < best_r:
-            best_r = r_bg
-            best_ta = t_a
-            best_tb = t_b
+            return None
+        pref_nonpos = 0 if r_bg <= 0.0 else 1  # prefer non-positive
+        return (pref_nonpos, abs(float(r_bg)), float(r_bg), float(t_a), float(t_b), n)
 
+    # Coarse grid over percentiles of channel A
+    coarse_start, coarse_stop, coarse_step = coarse_percentiles
+    coarse_percentile_values = np.arange(coarse_start, coarse_stop + 1e-6, coarse_step)
+    coarse_tas = [_percentile_backend(a_f, float(p)) for p in coarse_percentile_values]
+
+    best: Optional[Tuple[int, float, float, float, float, int]] = None
+    for t_a in coarse_tas:
+        candidate = evaluate(t_a)
+        if candidate is None:
+            continue
+        if best is None or (candidate[0], candidate[1]) < (best[0], best[1]):
+            best = candidate
+
+    if best is None:
+        return float("nan"), float("nan")
+
+    # Refinement around the best coarse threshold using a small fine grid
+    _, _, _, best_ta, _, _ = best
+    ref_span = (a_max - a_min) * 0.05
+    if len(coarse_tas) >= 2:
+        diffs = [abs(coarse_tas[i + 1] - coarse_tas[i]) for i in range(len(coarse_tas) - 1)]
+        if diffs:
+            ref_span = max(ref_span, max(diffs))
+    t_lo = max(a_min, best_ta - ref_span)
+    t_hi = min(a_max, best_ta + ref_span)
+    ref_steps = max(2, int(refine_steps))
+    for t_a in np.linspace(t_lo, t_hi, num=ref_steps):
+        candidate = evaluate(float(t_a))
+        if candidate is None:
+            continue
+        if (candidate[0], candidate[1]) < (best[0], best[1]):
+            best = candidate
+
+    # Final thresholds
+    _, _, _, best_ta, best_tb, _ = best
     return float(best_ta), float(best_tb)
 
 
@@ -891,15 +1057,27 @@ def compute_colocalization(
             a_norm, b_norm = a_raw, b_raw
 
         # Pearson, overlap, and Jaccard computed on all Z-slices together
-        r = _safe_corrcoef(
+        r_val, r_meta = _safe_corrcoef(
             a_norm,
             b_norm,
             winsor_clip=pearson_winsor_clip,
             min_count=pearson_min_count,
+            min_finite=None,
+            min_abs=20,
+            min_fraction=0.05,
+            return_meta=True,
             min_range=pearson_min_range,
         )
         ov = _overlap_coefficient(a_norm, b_norm)
-        jac = _jaccard_on_positive(a_norm, b_norm)
+        jac = _jaccard_on_positive(
+            a_norm,
+            b_norm,
+            thresholding="positive",
+            thresholds=None,
+            percentile=99.0,
+            min_union=20,
+            min_union_fraction=0.05,
+        )
 
         # Manders computed per Z-slice with independent thresholds
         num_z = img.shape[0]
@@ -961,7 +1139,8 @@ def compute_colocalization(
             raise ValueError("manders_weighting must be one of {'voxel','slice'}")
 
         return {
-            "pearson_r": float(r),
+            "pearson_r": float(r_val),
+            "pearson_meta": r_meta,
             "manders_m1": float(m1),
             "manders_m2": float(m2),
             "manders_m1_per_z": [float(x) for x in m1_per_z],

@@ -56,3 +56,5 @@ uv.lock
 paper/
 
 *.DS_Store
+__marimo__/
+my_notebook.py
