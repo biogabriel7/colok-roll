@@ -58,3 +58,5 @@ paper/
 *.DS_Store
 __marimo__/
 my_notebook.py
+trying_to_improve_background_removal.ipynb
+testing.py

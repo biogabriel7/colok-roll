@@ -21,18 +21,24 @@ import gc
 
 import numpy as np
 from skimage import filters, morphology
+from skimage.metrics import structural_similarity as skimage_ssim
 
 from ...core.config import BackgroundSubtractionConfig, PreprocessingConfig
 from ...core.utils import convert_microns_to_pixels
 from ...data_processing.image_loader import ImageLoader
-from .auto_bg_config import AUTO_BG_CONFIG
+import json
+from pathlib import Path
 
 from typing import TYPE_CHECKING
+
+from .backends import BackendAdapter, CpuAdapter, CudaAdapter, MpsAdapter
+from .cpu_backend import subtract_background_cpu
+from .cuda_backend import subtract_background_cuda
+from .mps_backend import subtract_background_mps
 
 # Optional backends are lazy-loaded to keep imports light
 CUDA_AVAILABLE = False
 cp = None
-cp_ndimage = None
 
 MPS_AVAILABLE = False
 torch = None
@@ -47,17 +53,42 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+AUTO_CACHE_FILENAME = "auto_bg_cache.json"
+# Heavier emphasis on background removal and contrast, lighter zero-penalty.
+# We add SSIM as an additional term (separate constant below).
+DEFAULT_AUTO_WEIGHTS: Tuple[float, float, float, float] = (0.7, 0.4, 0.2, 0.1)
+SSIM_WEIGHT: float = 0.3
+AUTO_METHODS: Tuple[str, ...] = ("rolling_ball", "gaussian", "two_stage", "morphological")
+DEFAULT_COARSE_SEEDS: Dict[str, Dict[str, List[Any]]] = {
+    "rolling_ball": {"radius": [16, 32, 64, 96, 128], "light_background": [False, True]},
+    "gaussian": {"sigma": [5.0, 20.0, 50.0, 100.0, 200.0]},
+    "two_stage": {
+        "sigma_stage1": [5.0, 15.0, 30.0, 60.0],
+        "radius_stage2": [16, 32, 64, 96],
+        "light_background": [False, True],
+    },
+    "morphological": {"size": [5, 15, 30, 60, 90], "shape": ["disk", "square"]},
+}
+REFINE_POINTS: Dict[str, int] = {"rolling_ball": 7, "gaussian": 8, "two_stage": 5, "morphological": 7}
+SECOND_REFINE_POINTS: Dict[str, int] = {"rolling_ball": 5, "gaussian": 6, "two_stage": 4, "morphological": 5}
+IMPROVEMENT_EPS = 0.02
+MAX_EVALS_PER_METHOD = 60
+MIN_INT_STEP = 1
+MIN_FLOAT_STEP = 0.5
+TOPN_COARSE = 3
+TESTED_VALUES_MAX = 20
+MIN_STD_RATIO = 0.08
+MIN_STD_ABS = 1e-3
+FG_MIN_PIXELS = 50
+FG_DILATE_RADIUS = 2
 def _ensure_cuda() -> bool:
     """Lazy-load CUDA dependencies."""
-    global cp, cp_ndimage, CUDA_AVAILABLE
+    global cp, CUDA_AVAILABLE
     if CUDA_AVAILABLE:
         return True
     try:
         import cupy as _cp  # type: ignore
-        import cupyx.scipy.ndimage as _cp_ndimage  # type: ignore
-
         cp = _cp
-        cp_ndimage = _cp_ndimage
         CUDA_AVAILABLE = True
     except ImportError:
         CUDA_AVAILABLE = False
@@ -119,7 +150,10 @@ class BackgroundSubtractor:
         """
         self.config = config or BackgroundSubtractionConfig()
         self.logger = logging.getLogger(__name__)
-        self.auto_cfg = auto_config or AUTO_BG_CONFIG
+        self.adapter: BackendAdapter
+        # auto_config is deprecated; zoom-search now uses built-in defaults plus cache
+        self.auto_weights = DEFAULT_AUTO_WEIGHTS
+        self.auto_cache_path = Path(__file__).with_name(AUTO_CACHE_FILENAME)
         
         # Determine backend: CUDA > MPS > CPU
         self.backend = self._select_backend(use_cuda, use_mps)
@@ -129,12 +163,15 @@ class BackgroundSubtractor:
         if self.backend == 'cuda':
             self.logger.info("Initializing CUDA-accelerated background subtractor")
             self._initialize_cuda()
+            self.adapter = CudaAdapter(self)
         elif self.backend == 'mps':
             self.logger.info("Initializing MPS-accelerated background subtractor (Apple Silicon)")
             self._initialize_mps()
+            self.adapter = MpsAdapter(self)
         else:
             self.logger.info("Initializing CPU background subtractor (SciPy)")
             self._initialize_cpu()
+            self.adapter = CpuAdapter(self)
     
     def _select_backend(self, use_cuda: Optional[bool], use_mps: Optional[bool]) -> str:
         """Select the best available backend."""
@@ -235,17 +272,22 @@ class BackgroundSubtractor:
         method = method or 'auto'
         
         if method == 'auto':
+            self.logger.info("Running AUTO background subtraction (channel=%s)", channel_name or "unknown")
             return self._auto_subtract_background(image, channel_name, pixel_size)
         
-        # Route to appropriate backend
-        self.logger.info(f"Applying {self.backend.upper()} {method} background subtraction to 3D image {image.shape}")
-        
-        if self.backend == 'cuda':
-            return self._subtract_background_cuda(image, method, channel_name, pixel_size, **kwargs)
-        elif self.backend == 'mps':
-            return self._subtract_background_mps(image, method, channel_name, pixel_size, **kwargs)
-        else:
-            return self._subtract_background_cpu(image, method, channel_name, pixel_size, chunk_size, **kwargs)
+        # Route to appropriate backend via adapter
+        channel_label = channel_name or "unknown"
+        self.logger.info(
+            f"Applying {self.backend.upper()} {method} background subtraction to 3D image {image.shape} (channel={channel_label})"
+        )
+        return self.adapter.subtract(
+            image=image,
+            method=method,
+            channel_name=channel_name,
+            pixel_size=pixel_size,
+            chunk_size=chunk_size,
+            **kwargs,
+        )
     
     def _subtract_background_cuda(
         self,
@@ -255,67 +297,15 @@ class BackgroundSubtractor:
         pixel_size: Optional[float],
         **kwargs
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """CUDA-accelerated background subtraction."""
-        if not _ensure_cuda():
-            raise RuntimeError("CUDA backend selected but CuPy is unavailable")
-        if cp_ndimage is None:
-            raise RuntimeError("CuPy ndimage module not available; reinstall cupy/cupyx")
-        try:
-            # Check if image fits in GPU memory
-            image_memory_gb = image.nbytes / (1024**3)
-            if image_memory_gb > self.max_gpu_memory_gb:
-                self.logger.error(f"Image too large for GPU memory ({image_memory_gb:.1f}GB > {self.max_gpu_memory_gb:.1f}GB)")
-                raise MemoryError("Input image exceeds available GPU memory. Consider reducing image size or parameters.")
-            
-            # Transfer image to GPU
-            gpu_image = cp.asarray(image, dtype=cp.float32)
-            
-            # Get method-specific parameters
-            params = self._get_method_parameters(method, channel_name, pixel_size, **kwargs)
-            
-            # Apply background subtraction
-            if method == 'rolling_ball':
-                corrected_image, metadata = self._rolling_ball_subtraction_3d_cuda(gpu_image, params)
-            elif method == 'gaussian':
-                corrected_image, metadata = self._gaussian_subtraction_3d_cuda(gpu_image, params)
-            elif method == 'morphological':
-                corrected_image, metadata = self._morphological_subtraction_3d_cuda(gpu_image, params)
-            elif method in {'two_stage', 'gaussian_then_rolling_ball'}:
-                corrected_image, metadata = self._two_stage_subtraction_3d_cuda(gpu_image, params)
-            else:
-                raise ValueError(f"Unknown background subtraction method: {method}")
-            
-            # Transfer result back to CPU
-            result = cp.asnumpy(corrected_image)
-            
-            # Clean up GPU memory
-            del gpu_image, corrected_image
-            cp.get_default_memory_pool().free_all_blocks()
-            
-            # Post-processing
-            if self.config.clip_negative_values:
-                result = np.clip(result, 0, None)
-                
-            if self.config.normalize_output:
-                result = self._normalize_image(result)
-            
-            # Update metadata
-            metadata.update({
-                'method': f'{method}_cuda',
-                'original_shape': image.shape,
-                'original_dtype': str(image.dtype),
-                'clipped_negative': self.config.clip_negative_values,
-                'normalized': self.config.normalize_output,
-                'parameters_used': params,
-                'gpu_accelerated': True,
-                'gpu_memory_used_gb': image_memory_gb
-            })
-            
-            return result, metadata
-            
-        except Exception as e:
-            self.logger.error(f"CUDA processing failed: {e}")
-            raise
+        """CUDA-accelerated background subtraction (delegates to cuda_backend)."""
+        return subtract_background_cuda(
+            self,
+            image=image,
+            method=method,
+            channel_name=channel_name,
+            pixel_size=pixel_size,
+            **kwargs,
+        )
     
     def _subtract_background_cpu(
         self,
@@ -327,46 +317,15 @@ class BackgroundSubtractor:
         **kwargs
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """CPU implementation of background subtraction."""
-        # Determine chunk size for memory efficiency
-        if chunk_size is None:
-            chunk_size = self._calculate_optimal_chunk_size(image.shape, image.dtype)
-        
-        # Get method-specific parameters
-        params = self._get_method_parameters(method, channel_name, pixel_size, **kwargs)
-        
-        # Apply background subtraction with chunked processing
-        if method == 'rolling_ball':
-            corrected_image, metadata = self._rolling_ball_subtraction_3d(image, params, chunk_size)
-        elif method == 'gaussian':
-            corrected_image, metadata = self._gaussian_subtraction_3d(image, params)
-        elif method == 'morphological':
-            corrected_image, metadata = self._morphological_subtraction_3d(image, params, chunk_size)
-        elif method in {'two_stage', 'gaussian_then_rolling_ball'}:
-            corrected_image, metadata = self._two_stage_subtraction_3d_cpu(image, params, chunk_size)
-        else:
-            raise ValueError(f"Unknown background subtraction method: {method}")
-        
-        # Post-processing
-        if self.config.clip_negative_values:
-            corrected_image = np.clip(corrected_image, 0, None)
-            
-        if self.config.normalize_output:
-            corrected_image = self._normalize_image(corrected_image)
-        
-        # Update metadata
-        metadata.update({
-            'method': method,
-            'original_shape': image.shape,
-            'original_dtype': str(image.dtype),
-            'clipped_negative': self.config.clip_negative_values,
-            'normalized': self.config.normalize_output,
-            'parameters_used': params,
-            'chunk_size_used': chunk_size,
-            'memory_efficient': chunk_size < image.shape[0],
-            'gpu_accelerated': False
-        })
-        
-        return corrected_image, metadata
+        return subtract_background_cpu(
+            self,
+            image=image,
+            method=method,
+            channel_name=channel_name,
+            pixel_size=pixel_size,
+            chunk_size=chunk_size,
+            **kwargs,
+        )
     
     def _get_method_parameters(
         self, 
@@ -644,7 +603,7 @@ class BackgroundSubtractor:
         if shape == 'disk':
             selem = morphology.disk(size)
         elif shape == 'square':
-            selem = morphology.square(size)
+            selem = morphology.rectangle(size, size)
         else:
             selem = morphology.disk(size)  # Default to disk
         
@@ -761,181 +720,15 @@ class BackgroundSubtractor:
         **kwargs
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """MPS-accelerated background subtraction using PyTorch + kornia."""
-        if not _ensure_mps():
-            raise RuntimeError("MPS backend selected but PyTorch/kornia are unavailable")
-        if kornia is None or torch is None:
-            raise RuntimeError("MPS dependencies missing; install torch with MPS and kornia")
-        params = self._get_method_parameters(method, channel_name, pixel_size, **kwargs)
-        
-        # Convert to PyTorch tensor on MPS
-        img_tensor = torch.from_numpy(image.astype(np.float32)).to(self.device)
-        
-        if method == 'gaussian':
-            corrected_tensor, metadata = self._gaussian_subtraction_mps(img_tensor, params)
-        elif method in {'two_stage', 'gaussian_then_rolling_ball'}:
-            corrected_tensor, metadata = self._two_stage_subtraction_mps(img_tensor, params)
-        elif method == 'rolling_ball':
-            # Rolling ball via morphological operations
-            corrected_tensor, metadata = self._rolling_ball_subtraction_mps(img_tensor, params)
-        elif method == 'morphological':
-            corrected_tensor, metadata = self._morphological_subtraction_mps(img_tensor, params)
-        else:
-            raise ValueError(f"Unknown method: {method}")
-        
-        # Transfer back to CPU numpy
-        result = corrected_tensor.cpu().numpy()
-        
-        # Post-processing
-        if self.config.clip_negative_values:
-            result = np.clip(result, 0, None)
-        if self.config.normalize_output:
-            result = self._normalize_image(result)
-        
-        metadata.update({
-            'method': f'{method}_mps',
-            'original_shape': image.shape,
-            'parameters_used': params,
-            'gpu_accelerated': True,
-            'backend': 'mps'
-        })
-        
-        return result, metadata
+        return subtract_background_mps(
+            self,
+            image=image,
+            method=method,
+            channel_name=channel_name,
+            pixel_size=pixel_size,
+            **kwargs,
+        )
     
-    def _gaussian_subtraction_mps(
-        self,
-        img_tensor: 'torch.Tensor',
-        params: Dict[str, Any]
-    ) -> Tuple['torch.Tensor', Dict[str, Any]]:
-        """MPS Gaussian background subtraction using kornia."""
-        sigma = params['sigma']
-        
-        # kornia expects (B, C, H, W), we have (Z, H, W)
-        # Process each Z slice
-        z_slices = img_tensor.shape[0]
-        corrected = torch.empty_like(img_tensor)
-        
-        # Kernel size should be odd and ~6*sigma
-        kernel_size = int(6 * sigma) | 1  # Make odd
-        
-        for z in range(z_slices):
-            slice_4d = img_tensor[z:z+1, None, :, :]  # (1, 1, H, W)
-            background = kornia.filters.gaussian_blur2d(
-                slice_4d, 
-                kernel_size=(kernel_size, kernel_size),
-                sigma=(sigma, sigma)
-            )
-            corrected[z] = (slice_4d - background).squeeze()
-        
-        metadata = {
-            'background_method': 'gaussian_mps',
-            'sigma': sigma,
-            'kernel_size': kernel_size
-        }
-        
-        return corrected, metadata
-    
-    def _two_stage_subtraction_mps(
-        self,
-        img_tensor: 'torch.Tensor',
-        params: Dict[str, Any]
-    ) -> Tuple['torch.Tensor', Dict[str, Any]]:
-        """MPS two-stage subtraction: Gaussian → morphological opening."""
-        sigma = float(params['sigma_stage1'])
-        radius = int(params['radius_stage2'])
-        light_background = bool(params.get('light_background', False))
-        
-        z_slices = img_tensor.shape[0]
-        kernel_size = int(6 * sigma) | 1
-        
-        # Stage 1: Gaussian
-        gauss_corr = torch.empty_like(img_tensor)
-        for z in range(z_slices):
-            slice_4d = img_tensor[z:z+1, None, :, :]
-            background = kornia.filters.gaussian_blur2d(
-                slice_4d,
-                kernel_size=(kernel_size, kernel_size),
-                sigma=(sigma, sigma)
-            )
-            gauss_corr[z] = (slice_4d - background).squeeze()
-        
-        if getattr(self.config, 'clip_negative_values', False):
-            gauss_corr = torch.clamp(gauss_corr, min=0)
-        
-        # Stage 2: Morphological opening/closing
-        # kornia morphology expects kernel shape (H, W), not (B, C, H, W)
-        morph_kernel = torch.ones(2*radius+1, 2*radius+1, device=self.device)
-        corrected = torch.empty_like(gauss_corr)
-        
-        for z in range(z_slices):
-            slice_4d = gauss_corr[z:z+1, None, :, :]
-            if light_background:
-                background = kornia.morphology.closing(slice_4d, morph_kernel)
-            else:
-                background = kornia.morphology.opening(slice_4d, morph_kernel)
-            corrected[z] = (slice_4d - background).squeeze()
-        
-        metadata = {
-            'background_method': 'two_stage_mps',
-            'stage1': {'sigma': sigma},
-            'stage2': {'radius': radius, 'light_background': light_background}
-        }
-        
-        return corrected, metadata
-    
-    def _rolling_ball_subtraction_mps(
-        self,
-        img_tensor: 'torch.Tensor',
-        params: Dict[str, Any]
-    ) -> Tuple['torch.Tensor', Dict[str, Any]]:
-        """MPS rolling ball approximation via morphological opening."""
-        radius = params['radius']
-        light_background = params.get('light_background', False)
-        
-        z_slices = img_tensor.shape[0]
-        # kornia morphology expects kernel shape (H, W), not (B, C, H, W)
-        morph_kernel = torch.ones(2*radius+1, 2*radius+1, device=self.device)
-        corrected = torch.empty_like(img_tensor)
-        
-        for z in range(z_slices):
-            slice_4d = img_tensor[z:z+1, None, :, :]
-            if light_background:
-                background = kornia.morphology.closing(slice_4d, morph_kernel)
-            else:
-                background = kornia.morphology.opening(slice_4d, morph_kernel)
-            corrected[z] = (slice_4d - background).squeeze()
-        
-        metadata = {
-            'background_method': 'rolling_ball_mps',
-            'radius': radius,
-            'light_background': light_background
-        }
-        
-        return corrected, metadata
-    
-    def _morphological_subtraction_mps(
-        self,
-        img_tensor: 'torch.Tensor',
-        params: Dict[str, Any]
-    ) -> Tuple['torch.Tensor', Dict[str, Any]]:
-        """MPS morphological background subtraction."""
-        size = params['size']
-        
-        z_slices = img_tensor.shape[0]
-        # kornia morphology expects kernel shape (H, W), not (B, C, H, W)
-        morph_kernel = torch.ones(2*size+1, 2*size+1, device=self.device)
-        corrected = torch.empty_like(img_tensor)
-        
-        for z in range(z_slices):
-            slice_4d = img_tensor[z:z+1, None, :, :]
-            background = kornia.morphology.closing(slice_4d, morph_kernel)
-            corrected[z] = (slice_4d - background).squeeze()
-        
-        metadata = {
-            'background_method': 'morphological_mps',
-            'size': size
-        }
-        
-        return corrected, metadata
     
     def _normalize_image(self, image: np.ndarray) -> np.ndarray:
         """Normalize image to 0-1 range while preserving relative intensities."""
@@ -950,168 +743,19 @@ class BackgroundSubtractor:
         return normalized
     
     # ==================== CUDA-ACCELERATED METHODS ====================
-    
-    def _rolling_ball_subtraction_3d_cuda(
-        self, 
-        gpu_image: cp.ndarray, 
-        params: Dict[str, Any]
-    ) -> Tuple[cp.ndarray, Dict[str, Any]]:
-        """CUDA-accelerated rolling ball background subtraction (morphological approximation).
-
-        Approximates ImageJ-style rolling-ball using greyscale morphology with a disk footprint.
-        Uses opening for dark background (typical) and closing if light_background=True.
-        """
-        radius = params['radius']
-        z_slices, height, width = gpu_image.shape
-        
-        self.logger.info(f"Processing {z_slices} z-slices with CUDA rolling ball approximation (radius={radius})")
-        
-        # Create structuring element (disk) once on GPU
-        selem = self._create_disk_selem_cuda(radius)
-        
-        # Pre-allocate output array on GPU
-        corrected_image = cp.empty_like(gpu_image, dtype=cp.float32)
-        
-        background_means: List[float] = []
-        background_stds: List[float] = []
-        light_background = params.get('light_background', False)
-        
-        # Process slices
-        for z in range(z_slices):
-            if light_background:
-                background = cp_ndimage.grey_closing(gpu_image[z], footprint=selem)
-            else:
-                background = cp_ndimage.grey_opening(gpu_image[z], footprint=selem)
-            corrected_image[z] = gpu_image[z].astype(cp.float32) - background.astype(cp.float32)
-            background_means.append(float(cp.mean(background)))
-            background_stds.append(float(cp.std(background)))
-        
-        metadata = {
-            'background_method': 'rolling_ball_3d_cuda',
-            'radius_pixels': radius,
-            'z_slices_processed': z_slices,
-            'background_stats': {
-                'mean_across_slices': float(np.mean(background_means)),
-                'std_across_slices': float(np.mean(background_stds)),
-                'gpu_processing': True
-            }
-        }
-        
-        return corrected_image, metadata
-    
-    def _create_rolling_ball_background_cuda(self, gpu_slice: cp.ndarray, radius: int, light_background: bool = False) -> cp.ndarray:
-        """Create rolling ball background on GPU using proper rolling ball algorithm."""
-        # For CUDA, we need to fall back to CPU implementation since scikit-image's rolling_ball
-        # doesn't have a GPU version. Transfer to CPU, process, and transfer back.
-        
-        # Transfer to CPU
-        cpu_slice = cp.asnumpy(gpu_slice)
-        
-        # Use the corrected CPU implementation
-        cpu_background = self._create_rolling_ball_background(cpu_slice, radius, light_background)
-        
-        # Transfer back to GPU
-        gpu_background = cp.asarray(cpu_background, dtype=cp.float32)
-        
-        return gpu_background
-    
-    def _create_disk_selem_cuda(self, radius: int) -> cp.ndarray:
-        """Create disk-shaped structuring element on GPU."""
-        if not _ensure_cuda():
-            raise RuntimeError("CUDA dependencies not available for structuring element creation")
-        # Create disk on CPU first (small operation)
-        cpu_disk = morphology.disk(radius)
-        # Transfer to GPU
-        return cp.asarray(cpu_disk, dtype=cp.uint8)
-    
-    def _gaussian_subtraction_3d_cuda(
-        self, 
-        gpu_image: cp.ndarray, 
-        params: Dict[str, Any]
-    ) -> Tuple[cp.ndarray, Dict[str, Any]]:
-        """CUDA-accelerated 3D Gaussian background subtraction."""
-        sigma = params['sigma']
-        
-        self.logger.info(f"Applying CUDA 3D Gaussian background subtraction with sigma={sigma}")
-        
-        # Create 3D Gaussian background on GPU
-        background = cp_ndimage.gaussian_filter(gpu_image, sigma=sigma)
-        
-        # Subtract background
-        corrected_image = gpu_image.astype(cp.float32) - background.astype(cp.float32)
-        
-        # Calculate statistics on GPU
-        bg_mean = float(cp.mean(background))
-        bg_std = float(cp.std(background))
-        bg_min = float(cp.min(background))
-        bg_max = float(cp.max(background))
-        
-        metadata = {
-            'background_method': 'gaussian_3d_cuda',
-            'sigma': sigma,
-            'background_stats': {
-                'mean': bg_mean,
-                'std': bg_std,
-                'min': bg_min,
-                'max': bg_max,
-                'gpu_processing': True
-            }
-        }
-        
-        # Clean up GPU memory
-        del background
-        cp.get_default_memory_pool().free_all_blocks()
-        
-        return corrected_image, metadata
-
-    def _two_stage_subtraction_3d_cuda(
-        self,
-        gpu_image: 'cp.ndarray',
-        params: Dict[str, Any]
-    ) -> Tuple['cp.ndarray', Dict[str, Any]]:
-        """Two-stage CUDA background subtraction: Gaussian → Rolling Ball.
-
-        Stage 1 removes diffuse haze; stage 2 removes local background while preserving
-        puncta/structures. Returns the final corrected GPU array and combined metadata.
-        """
-        sigma = float(params['sigma_stage1'])
-        radius = int(params['radius_stage2'])
-        light_background = bool(params.get('light_background', False))
-
-        # Stage 1: Gaussian
-        gauss_bg = cp_ndimage.gaussian_filter(gpu_image, sigma=sigma)
-        gauss_corr = gpu_image.astype(cp.float32) - gauss_bg.astype(cp.float32)
-        # Match manual two-step behavior: clip negatives after stage 1 if configured
-        if getattr(self.config, 'clip_negative_values', False):
-            gauss_corr = cp.maximum(gauss_corr, 0)
-
-        # Stage 2: Rolling ball approximation via greyscale morphology (opening/closing)
-        selem = self._create_disk_selem_cuda(radius)
-        z_slices = gauss_corr.shape[0]
-        final_corr = cp.empty_like(gauss_corr, dtype=cp.float32)
-        for z in range(z_slices):
-            if light_background:
-                background = cp_ndimage.grey_closing(gauss_corr[z], footprint=selem)
-            else:
-                background = cp_ndimage.grey_opening(gauss_corr[z], footprint=selem)
-            final_corr[z] = gauss_corr[z] - background.astype(cp.float32)
-
-        metadata = {
-            'background_method': 'two_stage_cuda',
-            'stage1': {'sigma': sigma},
-            'stage2': {'radius': radius, 'light_background': light_background},
-        }
-        return final_corr, metadata
-
     # ==================== AUTO MODE (GRID SEARCH + SCORING) ====================
 
     def _slice_masks_otsu(self, slice_np: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         thr = filters.threshold_otsu(slice_np)
         fg = slice_np >= thr
+        fg = morphology.remove_small_objects(fg, min_size=FG_MIN_PIXELS)
+        if FG_DILATE_RADIUS > 0:
+            fg = morphology.binary_dilation(fg, morphology.disk(FG_DILATE_RADIUS))
+        fg = morphology.binary_closing(fg, morphology.disk(1))
         bg = ~fg
         return fg, bg
 
-    def _slice_metrics(self, orig_slice: np.ndarray, corr_slice: np.ndarray) -> Tuple[float, float, float, float, float, float, float]:
+    def _slice_metrics(self, orig_slice: np.ndarray, corr_slice: np.ndarray) -> Tuple[float, float, float, float, float, float, float, float, float, float]:
         fg, bg = self._slice_masks_otsu(orig_slice)
         bg0 = float(np.median(orig_slice[bg])) if np.any(bg) else float(np.median(orig_slice))
         bg1 = float(np.median(corr_slice[bg])) if np.any(bg) else float(np.median(corr_slice))
@@ -1120,142 +764,362 @@ class BackgroundSubtractor:
         g0 = float(np.mean(filters.sobel(orig_slice)[fg])) if np.any(fg) else 0.0
         g1 = float(np.mean(filters.sobel(corr_slice)[fg])) if np.any(fg) else 0.0
         zf = float(np.mean(corr_slice == 0))
-        return bg0, bg1, c0, c1, g0, g1, zf
+        # Masked SSIM; zero background to avoid noise influence
+        if np.any(fg):
+            orig_fg = orig_slice * fg
+            corr_fg = corr_slice * fg
+            dr = float(orig_fg.max() - orig_fg.min() or 1.0)
+            try:
+                ssim_fg = float(skimage_ssim(orig_fg, corr_fg, data_range=dr))
+            except Exception:
+                ssim_fg = 0.0
+        else:
+            ssim_fg = 0.0
+        orig_std = float(np.std(orig_slice))
+        corr_std = float(np.std(corr_slice))
+        return bg0, bg1, c0, c1, g0, g1, zf, ssim_fg, orig_std, corr_std
 
-    def _score_volume(self, original: np.ndarray, corrected: np.ndarray, weights: Tuple[float, float, float, float], max_slices: int = 5) -> float:
+    def _score_volume(self, original: np.ndarray, corrected: np.ndarray, weights: Tuple[float, float, float, float], max_slices: int = 7) -> Tuple[float, Dict[str, float]]:
         w_bg, w_contrast, w_grad, w_zero = weights
         z = original.shape[0]
         idx = np.linspace(0, z - 1, num=min(z, max_slices), dtype=int)
         scores: List[float] = []
+        metrics_accum = {
+            "bg_improve": 0.0,
+            "contrast_gain": 0.0,
+            "grad_ratio": 0.0,
+            "zero_frac": 0.0,
+            "ssim_fg": 0.0,
+            "orig_std": 0.0,
+            "corr_std": 0.0,
+        }
         for zi in idx:
-            b0, b1, c0, c1, g0, g1, zf = self._slice_metrics(original[zi], corrected[zi])
+            b0, b1, c0, c1, g0, g1, zf, ssim_fg, orig_std, corr_std = self._slice_metrics(original[zi], corrected[zi])
             bg_improve = (b0 - b1) / (b0 + 1e-6)
             contrast_gain = (c1 - c0) / (abs(c0) + 1e-6)
             grad_ratio = g1 / (g0 + 1e-6)
-            score = w_bg * bg_improve + w_contrast * contrast_gain + w_grad * min(1.0, grad_ratio) - w_zero * zf
+            score = (
+                w_bg * bg_improve
+                + w_contrast * contrast_gain
+                + w_grad * min(1.0, grad_ratio)
+                - w_zero * zf
+                + SSIM_WEIGHT * ssim_fg
+            )
             scores.append(score)
-        return float(np.mean(scores))
+            metrics_accum["bg_improve"] += bg_improve
+            metrics_accum["contrast_gain"] += contrast_gain
+            metrics_accum["grad_ratio"] += grad_ratio
+            metrics_accum["zero_frac"] += zf
+            metrics_accum["ssim_fg"] += ssim_fg
+            metrics_accum["orig_std"] += orig_std
+            metrics_accum["corr_std"] += corr_std
+        n = len(idx) or 1
+        for k in metrics_accum:
+            metrics_accum[k] /= n
+        return float(np.mean(scores)), metrics_accum
+    
+    def _normalize_channel_key(self, channel_name: Optional[str]) -> str:
+        return channel_name.lower() if channel_name else "unknown"
 
-    def _expand_grid(self, grid_spec: Dict[str, List[Any]], method_name: str) -> List[Dict[str, Any]]:
-        # Expand a small product grid into concrete param dicts
+    def _load_auto_cache(self) -> Dict[str, Any]:
+        if self.auto_cache_path.exists():
+            try:
+                return json.loads(self.auto_cache_path.read_text())
+            except Exception as exc:
+                self.logger.warning("Failed to load auto cache %s: %s", self.auto_cache_path, exc)
+        return {"channels": {}}
+
+    def _save_auto_cache(self, cache: Dict[str, Any]) -> None:
+        try:
+            self.auto_cache_path.write_text(json.dumps(cache, indent=2))
+        except Exception as exc:
+            self.logger.warning("Failed to save auto cache %s: %s", self.auto_cache_path, exc)
+
+    def _select_sample_indices(self, z: int, max_slices: int = 9) -> np.ndarray:
+        if z <= max_slices:
+            return np.arange(z, dtype=int)
+        return np.linspace(0, z - 1, num=max_slices, dtype=int)
+
+    def _merge_seed_ranges(self, method: str, channel_entry: Dict[str, Any]) -> Dict[str, List[Any]]:
+        base = {k: list(v) for k, v in DEFAULT_COARSE_SEEDS.get(method, {}).items()}
+        method_cache = channel_entry.get("methods", {}).get(method, {})
+        tested_values = method_cache.get("tested_values", {})
+        for param, values in tested_values.items():
+            merged = list(set(base.get(param, []) + list(values)))
+            # Keep deterministic ordering for reproducibility
+            try:
+                merged_sorted = sorted(merged)
+            except Exception:
+                merged_sorted = merged
+            base[param] = merged_sorted
+        return base
+
+    def _refine_numeric_values(
+        self,
+        best_value: float,
+        neighbor_values: List[Any],
+        points: int,
+        shrink: float = 0.75,
+        is_int: bool = False,
+    ) -> List[Any]:
+        numeric_values = sorted({float(v) for v in neighbor_values})
+        lower_neighbors = [v for v in numeric_values if v < best_value]
+        upper_neighbors = [v for v in numeric_values if v > best_value]
+        lower_bound = max(lower_neighbors) if lower_neighbors else max(best_value * 0.5, 0.0)
+        upper_bound = min(upper_neighbors) if upper_neighbors else best_value * 1.5
+        span_lower = best_value - lower_bound
+        span_upper = upper_bound - best_value
+        window = max(span_lower, span_upper) * shrink
+        start = max(0.0, best_value - window)
+        end = best_value + window
+        if points <= 1 or end <= start:
+            refined = [best_value]
+        else:
+            step = (end - start) / max(points - 1, 1)
+            step = max(step, MIN_INT_STEP if is_int else MIN_FLOAT_STEP)
+            refined = [start + i * step for i in range(points)]
+        refined.append(best_value)
+        refined_unique = sorted(set(refined))
+        if is_int:
+            refined_unique = sorted({int(round(v)) for v in refined_unique})
+        return refined_unique
+
+    def _build_refined_ranges(
+        self,
+        best_params: Dict[str, Any],
+        coarse_ranges: Dict[str, List[Any]],
+        method: str,
+        points_map: Dict[str, int],
+        shrink: float = 0.75,
+    ) -> Dict[str, List[Any]]:
+        refined: Dict[str, List[Any]] = {}
+        points = points_map.get(method, 7)
+        for param, values in coarse_ranges.items():
+            if isinstance(values[0], bool) or isinstance(values[0], str):
+                refined[param] = [best_params.get(param, values[0])]
+            else:
+                is_int = isinstance(values[0], int)
+                refined[param] = self._refine_numeric_values(
+                    float(best_params.get(param, values[0])),
+                    values,
+                    points,
+                    shrink=shrink,
+                    is_int=is_int,
+                )
+        return refined
+
+    def _expand_param_grid(self, grid_spec: Dict[str, List[Any]]) -> List[Dict[str, Any]]:
         from itertools import product
         keys = [k for k in grid_spec.keys()]
         values = [grid_spec[k] for k in keys]
         candidates: List[Dict[str, Any]] = []
         for combo in product(*values):
             p = {k: v for k, v in zip(keys, combo)}
-            p['method'] = method_name
             candidates.append(p)
         return candidates
 
-    def _get_auto_param_grid(self, channel_name: Optional[str]) -> Tuple[List[Dict[str, Any]], Tuple[float, float, float, float], str, Optional[Dict[str, Any]], bool]:
-        name_key = channel_name if channel_name in self.auto_cfg else 'DEFAULT'
-        cfg = self.auto_cfg[name_key]
-        grids = cfg.get('grid', {})
-        weights_cfg = cfg.get('weights', {"w_bg": 0.5, "w_contrast": 0.3, "w_grad": 0.2, "w_zero": 0.3})
-        weights = (float(weights_cfg['w_bg']), float(weights_cfg['w_contrast']), float(weights_cfg['w_grad']), float(weights_cfg['w_zero']))
-        explanation = cfg.get('explanation', '')
-        default_params = cfg.get('default')
-        force_default = bool(cfg.get('force_default', False))
-
-        candidates: List[Dict[str, Any]] = []
-        for method_name, grid_spec in grids.items():
-            candidates.extend(self._expand_grid(grid_spec, method_name))
-        return candidates, weights, explanation, default_params, force_default
-
-    def _run_single_cuda(self, image: np.ndarray, method: str, params: Dict[str, Any]) -> Tuple[np.ndarray, Dict[str, Any]]:
-        # Avoid passing 'method' twice (positional + kwargs)
+    def _run_single_cuda(
+        self, image: np.ndarray, method: str, params: Dict[str, Any], channel_name: Optional[str], pixel_size: Optional[float]
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
         clean_params = {k: v for k, v in params.items() if k != 'method'}
-        return self._subtract_background_cuda(image, method, None, None, **clean_params)
+        return self._subtract_background_cuda(image, method, channel_name, pixel_size, **clean_params)
     
-    def _run_single_mps(self, image: np.ndarray, method: str, params: Dict[str, Any]) -> Tuple[np.ndarray, Dict[str, Any]]:
+    def _run_single_mps(
+        self, image: np.ndarray, method: str, params: Dict[str, Any], channel_name: Optional[str], pixel_size: Optional[float]
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
         clean_params = {k: v for k, v in params.items() if k != 'method'}
-        return self._subtract_background_mps(image, method, None, None, **clean_params)
+        return self._subtract_background_mps(image, method, channel_name, pixel_size, **clean_params)
     
-    def _run_single_cpu(self, image: np.ndarray, method: str, params: Dict[str, Any]) -> Tuple[np.ndarray, Dict[str, Any]]:
+    def _run_single_cpu(
+        self, image: np.ndarray, method: str, params: Dict[str, Any], channel_name: Optional[str], pixel_size: Optional[float]
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
         clean_params = {k: v for k, v in params.items() if k != 'method'}
         chunk_size = self._calculate_optimal_chunk_size(image.shape, image.dtype)
-        return self._subtract_background_cpu(image, method, None, None, chunk_size, **clean_params)
+        return self._subtract_background_cpu(image, method, channel_name, pixel_size, chunk_size, **clean_params)
     
-    def _run_single(self, image: np.ndarray, method: str, params: Dict[str, Any]) -> Tuple[np.ndarray, Dict[str, Any]]:
+    def _run_single(
+        self, image: np.ndarray, method: str, params: Dict[str, Any], channel_name: Optional[str], pixel_size: Optional[float]
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """Run a single background subtraction using the current backend."""
         if self.backend == 'cuda':
-            return self._run_single_cuda(image, method, params)
+            return self._run_single_cuda(image, method, params, channel_name, pixel_size)
         elif self.backend == 'mps':
-            return self._run_single_mps(image, method, params)
+            return self._run_single_mps(image, method, params, channel_name, pixel_size)
         else:
-            return self._run_single_cpu(image, method, params)
+            return self._run_single_cpu(image, method, params, channel_name, pixel_size)
+
+    def _evaluate_candidates(
+        self,
+        image_sample: np.ndarray,
+        method: str,
+        candidates: List[Dict[str, Any]],
+        weights: Tuple[float, float, float, float],
+        max_slices: int,
+        max_evals: int,
+        channel_name: Optional[str],
+        pixel_size: Optional[float],
+    ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        scores: List[Dict[str, Any]] = []
+        best: Optional[Dict[str, Any]] = None
+        for idx, params in enumerate(candidates):
+            if idx >= max_evals:
+                break
+            corrected_sample, _ = self._run_single(image_sample, method, params, channel_name, pixel_size)
+            self._sync_backend()
+            score, comps = self._score_volume(image_sample, corrected_sample, weights, max_slices=max_slices)
+            # Post-check: reject flattened outputs
+            std_penalty = False
+            if comps["corr_std"] < MIN_STD_ABS or comps["corr_std"] < MIN_STD_RATIO * max(comps["orig_std"], 1e-6):
+                score = -1e6
+                std_penalty = True
+            entry = {'params': params, 'score': float(score), 'components': comps, 'std_penalty': std_penalty}
+            scores.append(entry)
+            if best is None or score > best['score']:
+                best = {'params': params, 'score': float(score), 'components': comps, 'std_penalty': std_penalty}
+        return scores, best
+
+    def _zoom_search_method(
+        self,
+        image_sample: np.ndarray,
+        method: str,
+        seed_ranges: Dict[str, List[Any]],
+        weights: Tuple[float, float, float, float],
+        max_slices: int,
+        channel_name: Optional[str],
+        pixel_size: Optional[float],
+    ) -> Dict[str, Any]:
+        all_scores: List[Dict[str, Any]] = []
+        ranges_used: Dict[str, Dict[str, List[Any]]] = {"coarse": seed_ranges}
+
+        coarse_candidates = self._expand_param_grid(seed_ranges)
+        coarse_scores, best_coarse = self._evaluate_candidates(
+            image_sample, method, coarse_candidates, weights, max_slices=max_slices, max_evals=MAX_EVALS_PER_METHOD,
+            channel_name=channel_name, pixel_size=pixel_size,
+        )
+        all_scores.extend(coarse_scores)
+        if best_coarse is None:
+            return {
+                "method": method,
+                "best_params": None,
+                "best_score": -np.inf,
+                "scores": all_scores,
+                "ranges_used": ranges_used,
+            }
+
+        # Prune to top-N coarse before refinement
+        coarse_sorted = sorted(coarse_scores, key=lambda x: x['score'], reverse=True)
+        top_coarse = coarse_sorted[:TOPN_COARSE]
+        remaining_evals = max(0, MAX_EVALS_PER_METHOD - len(all_scores))
+        per_candidate_budget = max(1, remaining_evals // max(len(top_coarse), 1))
+
+        current_best = best_coarse
+        refine_idx = 0
+        for candidate in top_coarse:
+            refine_ranges = self._build_refined_ranges(candidate["params"], seed_ranges, method, REFINE_POINTS)
+            ranges_used[f"refine{refine_idx}"] = refine_ranges
+            refine_idx += 1
+            refined_candidates = self._expand_param_grid(refine_ranges)
+            refined_scores, best_refined = self._evaluate_candidates(
+                image_sample, method, refined_candidates, weights, max_slices=max_slices,
+                max_evals=per_candidate_budget, channel_name=channel_name, pixel_size=pixel_size,
+            )
+            all_scores.extend(refined_scores)
+            if best_refined and best_refined["score"] > current_best["score"]:
+                current_best = best_refined
+
+        return {
+            "method": method,
+            "best_params": current_best["params"],
+            "best_score": current_best["score"],
+            "scores": all_scores,
+            "ranges_used": ranges_used,
+        }
+
+    def _collect_tested_values(self, scores: List[Dict[str, Any]]) -> Dict[str, List[Any]]:
+        tested: Dict[str, List[Any]] = {}
+        for entry in scores:
+            for k, v in entry["params"].items():
+                tested.setdefault(k, [])
+                if v not in tested[k]:
+                    tested[k].append(v)
+                # Keep only the most recent TESTED_VALUES_MAX
+                if len(tested[k]) > TESTED_VALUES_MAX:
+                    tested[k] = tested[k][-TESTED_VALUES_MAX:]
+        return tested
 
     def _auto_subtract_background(self, image: np.ndarray, channel_name: Optional[str], pixel_size: Optional[float]) -> Tuple[np.ndarray, Dict[str, Any]]:
-        candidates, weights, explanation, default_params, force_default = self._get_auto_param_grid(channel_name or 'DEFAULT')
+        channel_key = self._normalize_channel_key(channel_name)
+        cache = self._load_auto_cache()
+        channel_entry = cache.get("channels", {}).get(channel_key, {})
+
         z = image.shape[0]
-        # Choose 5 symmetric slices around the middle: mid-2, mid-1, mid, mid+1, mid+2
-        mid = int(z // 2)
-        candidate_idx = [mid - 2, mid - 1, mid, mid + 1, mid + 2]
-        sample_idx = np.array([i for i in candidate_idx if 0 <= i < z], dtype=int)
+        sample_idx = self._select_sample_indices(z)
         image_sample = image[sample_idx]
+        weights = self.auto_weights
 
-        best_score = -np.inf
-        best_params: Optional[Dict[str, Any]] = None
-        best_method: Optional[str] = None
-        scores_list: List[Dict[str, Any]] = []
-        last_scores: List[float] = []
+        method_results: List[Dict[str, Any]] = []
+        for method in AUTO_METHODS:
+            seed_ranges = self._merge_seed_ranges(method, channel_entry)
+            result = self._zoom_search_method(
+                image_sample,
+                method,
+                seed_ranges,
+                weights,
+                max_slices=min(5, len(sample_idx)),
+                channel_name=channel_name,
+                pixel_size=pixel_size,
+            )
+            method_results.append(result)
 
-        # If force_default, use it directly without grid search
-        if force_default and default_params is not None:
-            best_method = default_params['method']
-            corrected_full, metadata = self._run_single(image, best_method, default_params)
-            method_suffix = f'_{self.backend}' if self.backend != 'cpu' else ''
-            metadata.update({
-                'auto_selected': True,
-                'auto_candidates_tested': 1,
-                'auto_scores': [{'params': default_params, 'score': None}],
-                'auto_sample_indices': sample_idx.tolist(),
-                'auto_explanation': explanation,
-                'parameters_used': {k: v for k, v in default_params.items() if k != 'method'},
-                'method': f'gaussian+rolling_ball{method_suffix}' if best_method in {'two_stage', 'gaussian_then_rolling_ball'} else metadata.get('method', f'{best_method}{method_suffix}'),
-            })
-            return corrected_full, metadata
+        # Pick best method
+        best_overall = max(method_results, key=lambda r: r.get("best_score", -np.inf))
+        best_method = best_overall["method"]
+        best_params = best_overall["best_params"]
 
-        # If config defines a default, evaluate it first and prefer it on ties
-        preferred_method = None
-        if default_params is not None:
-            preferred_method = default_params.get('method')
-            corrected_sample, meta = self._run_single(image_sample, preferred_method, default_params)
-            self._sync_backend()
-            s = self._score_volume(image_sample, corrected_sample, weights, max_slices=min(5, len(sample_idx)))
-            scores_list.append({'params': default_params, 'score': float(s)})
-            best_score = float(s)
-            best_params = default_params
-            best_method = preferred_method
+        if best_params is None:
+            raise RuntimeError("Auto background subtraction failed to find valid parameters")
 
-        for params in candidates:
-            method = params['method']
-            corrected_sample, meta = self._run_single(image_sample, method, params)
-            self._sync_backend()
-            s = self._score_volume(image_sample, corrected_sample, weights, max_slices=min(5, len(sample_idx)))
-            scores_list.append({'params': params, 'score': float(s)})
-            # Prefer default method on ties within epsilon
-            epsilon = 0.01
-            if s > best_score + epsilon or (abs(s - best_score) <= epsilon and preferred_method == method):
-                best_score = float(s)
-                best_params = params
-                best_method = method
-            last_scores.append(float(s))
-            if len(last_scores) >= 3 and last_scores[-1] < last_scores[-2] < last_scores[-3]:
-                # simple early stop when monotonically decreasing
-                break
-
-        assert best_method is not None and best_params is not None
-        corrected_full, metadata = self._run_single(image, best_method, best_params)
+        corrected_full, metadata = self._run_single(image, best_method, best_params, channel_name, pixel_size)
         method_suffix = f'_{self.backend}' if self.backend != 'cpu' else ''
+
+        # Cache update
+        cache.setdefault("channels", {})
+        channel_cache = cache["channels"].setdefault(channel_key, {"methods": {}})
+        for result in method_results:
+            method_name = result["method"]
+            tested_values = self._collect_tested_values(result["scores"])
+            channel_cache["methods"][method_name] = {
+                "best_params": result["best_params"],
+                "best_score": result["best_score"],
+                "tested_values": tested_values,
+                "ranges_used": result["ranges_used"],
+            }
+        self._save_auto_cache(cache)
+
+        top3 = sorted(
+            [
+                {
+                    "method": r["method"],
+                    "best_score": r.get("best_score"),
+                    "best_params": r.get("best_params"),
+                }
+                for r in method_results
+            ],
+            key=lambda x: x.get("best_score", -np.inf),
+            reverse=True,
+        )[:3]
+
         metadata.update({
             'auto_selected': True,
-            'auto_candidates_tested': len(scores_list),
-            'auto_scores': scores_list,
+            'auto_mode': 'zoom_search_v2',
+            'auto_candidates_tested': sum(len(r["scores"]) for r in method_results),
+            'auto_method_scores': [{'method': r['method'], 'best_score': r.get('best_score')} for r in method_results],
+            'auto_top3_methods': top3,
             'auto_sample_indices': sample_idx.tolist(),
-            'auto_explanation': explanation,
-            'parameters_used': {k: v for k, v in best_params.items() if k != 'method'},
+            'auto_cache_path': str(self.auto_cache_path),
+            'auto_cache_hit': bool(channel_entry),
+            'auto_ranges_used': best_overall.get("ranges_used", {}),
+            'parameters_used': best_params,
             'method': f'gaussian+rolling_ball{method_suffix}' if best_method in {'two_stage', 'gaussian_then_rolling_ball'} else metadata.get('method', f'{best_method}{method_suffix}'),
         })
         return corrected_full, metadata
@@ -1267,51 +1131,6 @@ class BackgroundSubtractor:
         elif self.backend == 'mps' and _ensure_mps():
             torch.mps.synchronize()
         # CPU doesn't need synchronization
-    
-    def _morphological_subtraction_3d_cuda(
-        self, 
-        gpu_image: cp.ndarray, 
-        params: Dict[str, Any]
-    ) -> Tuple[cp.ndarray, Dict[str, Any]]:
-        """CUDA-accelerated morphological background subtraction."""
-        size = params['size']
-        shape = params.get('shape', 'disk')
-        z_slices = gpu_image.shape[0]
-        
-        # Create structuring element on GPU
-        if shape == 'disk':
-            selem = self._create_disk_selem_cuda(size)
-        elif shape == 'square':
-            cpu_square = morphology.square(size)
-            selem = cp.asarray(cpu_square, dtype=cp.uint8)
-        else:
-            selem = self._create_disk_selem_cuda(size)
-        
-        # Pre-allocate output array on GPU
-        corrected_image = cp.empty_like(gpu_image, dtype=cp.float32)
-        
-        # Process all slices on GPU using greyscale morphology
-        background_means: List[float] = []
-        background_stds: List[float] = []
-        for z in range(z_slices):
-            background = cp_ndimage.grey_closing(gpu_image[z], footprint=selem)
-            corrected_image[z] = gpu_image[z].astype(cp.float32) - background.astype(cp.float32)
-            background_means.append(float(cp.mean(background)))
-            background_stds.append(float(cp.std(background)))
-        
-        metadata = {
-            'background_method': 'morphological_3d_cuda',
-            'size': size,
-            'shape': shape,
-            'z_slices_processed': z_slices,
-            'background_stats': {
-                'mean_across_slices': float(np.mean(background_means)),
-                'std_across_slices': float(np.mean(background_stds)),
-                'gpu_processing': True
-            }
-        }
-        
-        return corrected_image, metadata
     
     def process_from_loader(
         self,

@@ -24,6 +24,7 @@ from .data_processing import ImageLoader, MIPCreator, SMEResult
 
 # Imaging preprocessing
 from .imaging_preprocessing import (
+    BackgroundSubtractor,
     ZSliceSelectionResult,
     aggregate_focus_scores,
     compute_focus_scores,
@@ -67,6 +68,7 @@ __all__ = [
     "SMEResult",
     
     # Imaging preprocessing
+    "BackgroundSubtractor",
     "ZSliceSelectionResult",
     "aggregate_focus_scores",
     "compute_focus_scores",
