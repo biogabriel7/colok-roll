@@ -60,3 +60,10 @@ __marimo__/
 my_notebook.py
 trying_to_improve_background_removal.ipynb
 testing.py
+AUTOMATIC_KEEP_TOP_EXAMPLE.md
+STRATEGY_COMPARISON_GUIDE.md
+quick_comparison/comparison_summary.txt
+custom_comparison/comparison_summary.txt
+Z_SLICE_SELECTION_WORKFLOW.md
+Z_SLICE_ENHANCEMENTS.md
+example_strategy_comparison.py

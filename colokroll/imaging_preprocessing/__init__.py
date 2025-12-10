@@ -3,19 +3,23 @@
 from .background_subtraction import BackgroundSubtractor
 from .z_slice_detection import (
     ZSliceSelectionResult,
+    StrategyComparisonResult,
     aggregate_focus_scores,
     compute_focus_scores,
     detect_slices_to_keep,
     select_z_slices,
+    compare_strategies,
 )
 
 __all__ = [
     "BackgroundSubtractor",
     "ZSliceSelectionResult",
+    "StrategyComparisonResult",
     "aggregate_focus_scores",
     "compute_focus_scores",
     "detect_slices_to_keep",
     "select_z_slices",
+    "compare_strategies",
 ]
 
 
