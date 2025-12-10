@@ -26,10 +26,12 @@ from .data_processing import ImageLoader, MIPCreator, SMEResult
 from .imaging_preprocessing import (
     BackgroundSubtractor,
     ZSliceSelectionResult,
+    StrategyComparisonResult,
     aggregate_focus_scores,
     compute_focus_scores,
     detect_slices_to_keep,
     select_z_slices,
+    compare_strategies,
 )
 
 # Visualization
@@ -70,10 +72,12 @@ __all__ = [
     # Imaging preprocessing
     "BackgroundSubtractor",
     "ZSliceSelectionResult",
+    "StrategyComparisonResult",
     "aggregate_focus_scores",
     "compute_focus_scores",
     "detect_slices_to_keep",
     "select_z_slices",
+    "compare_strategies",
     
     # Visualization
     "Visualizer",
