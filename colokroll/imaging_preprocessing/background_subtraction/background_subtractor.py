@@ -861,6 +861,7 @@ class BackgroundSubtractor:
         points: int,
         shrink: float = 0.75,
         is_int: bool = False,
+        min_value: Optional[float] = None,
     ) -> List[Any]:
         numeric_values = sorted({float(v) for v in neighbor_values})
         lower_neighbors = [v for v in numeric_values if v < best_value]
@@ -870,7 +871,9 @@ class BackgroundSubtractor:
         span_lower = best_value - lower_bound
         span_upper = upper_bound - best_value
         window = max(span_lower, span_upper) * shrink
-        start = max(0.0, best_value - window)
+        # Apply parameter-specific minimum bounds
+        absolute_min = min_value if min_value is not None else 0.0
+        start = max(absolute_min, best_value - window)
         end = best_value + window
         if points <= 1 or end <= start:
             refined = [best_value]
@@ -892,6 +895,15 @@ class BackgroundSubtractor:
         points_map: Dict[str, int],
         shrink: float = 0.75,
     ) -> Dict[str, List[Any]]:
+        # Define minimum bounds for specific parameters
+        PARAM_MIN_VALUES = {
+            'size': 3.0,  # Morphological size must be at least 3 for valid structuring element
+            'radius': 5.0,  # Rolling ball radius minimum
+            'radius_stage2': 5.0,  # Two-stage rolling ball minimum
+            'sigma': 0.5,  # Gaussian sigma minimum
+            'sigma_stage1': 0.5,  # Two-stage Gaussian minimum
+        }
+        
         refined: Dict[str, List[Any]] = {}
         points = points_map.get(method, 7)
         for param, values in coarse_ranges.items():
@@ -899,12 +911,14 @@ class BackgroundSubtractor:
                 refined[param] = [best_params.get(param, values[0])]
             else:
                 is_int = isinstance(values[0], int)
+                min_value = PARAM_MIN_VALUES.get(param, None)
                 refined[param] = self._refine_numeric_values(
                     float(best_params.get(param, values[0])),
                     values,
                     points,
                     shrink=shrink,
                     is_int=is_int,
+                    min_value=min_value,
                 )
         return refined
 
