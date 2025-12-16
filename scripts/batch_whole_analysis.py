@@ -54,6 +54,10 @@ from colokroll.analysis.colocalization import (
     export_colocalization_json,
     estimate_min_area_threshold,
 )
+from colokroll.analysis.puncta import (
+    compute_puncta,
+    export_puncta_json,
+)
 
 
 def norm01(a: np.ndarray) -> np.ndarray:
@@ -249,6 +253,66 @@ def process_one_image(image_path: Path, out_root: Path, args) -> None:
         )
     except Exception as e:
         logging.warning("JSON export failed (continuing): %s", e)
+
+    # Step 8: Puncta analysis for ALIX and LAMP1 channels
+    puncta_dir = out_root / "puncta"
+    puncta_dir.mkdir(parents=True, exist_ok=True)
+
+    for puncta_channel in ["ALIX", "LAMP1"]:
+        try:
+            puncta_res = compute_puncta(
+                image=results,  # background-corrected results dict
+                mask=mask_path,
+                channel=puncta_channel,
+                projection="mip",
+                pixel_size_um=pixel_size,
+                expected_diameter_um=0.5,
+                min_diameter_um=0.2,
+                max_diameter_um=2.0,
+                snr_threshold=3.0,
+            )
+
+            # Save puncta outputs (CSV per sample per channel)
+            df_puncta = pd.DataFrame(puncta_res["results"]["puncta"])
+            if not df_puncta.empty:
+                df_puncta = df_puncta.sort_values("punctum_id")
+            df_puncta.to_csv(
+                puncta_dir / f"{image_path.stem}_{puncta_channel}_per_punctum.csv",
+                index=False,
+            )
+
+            df_per_cell = pd.DataFrame(puncta_res["results"]["per_label"])
+            if not df_per_cell.empty:
+                df_per_cell = df_per_cell.sort_values("cell_label")
+            df_per_cell.to_csv(
+                puncta_dir / f"{image_path.stem}_{puncta_channel}_per_cell.csv",
+                index=False,
+            )
+
+            df_total = pd.DataFrame([puncta_res["results"]["total_image"]])
+            df_total.to_csv(
+                puncta_dir / f"{image_path.stem}_{puncta_channel}_total.csv",
+                index=False,
+            )
+
+            # Optional JSON for provenance
+            try:
+                export_puncta_json(
+                    puncta_res,
+                    out_path=puncta_dir / f"{image_path.stem}_{puncta_channel}_puncta.json",
+                )
+            except Exception as e:
+                logging.warning("Puncta JSON export failed for %s: %s", puncta_channel, e)
+
+            logging.info(
+                "Puncta analysis for %s: %d puncta in %d cells",
+                puncta_channel,
+                puncta_res["results"]["total_image"]["total_puncta_count"],
+                puncta_res["results"]["total_image"]["n_cells"],
+            )
+
+        except Exception as e:
+            logging.warning("Puncta analysis failed for %s (continuing): %s", puncta_channel, e)
 
     # Cleanup per-sample intermediates (CPU+GPU)
     try:

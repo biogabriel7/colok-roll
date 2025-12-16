@@ -7,6 +7,10 @@ from .colocalization import (
     export_colocalization_json,
     estimate_min_area_threshold,
 )
+from .puncta import (
+    compute_puncta,
+    export_puncta_json,
+)
 
 __all__ = [
     "CellSegmenter",
@@ -15,4 +19,6 @@ __all__ = [
     "compute_colocalization",
     "export_colocalization_json",
     "estimate_min_area_threshold",
+    "compute_puncta",
+    "export_puncta_json",
 ]
