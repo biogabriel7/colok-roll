@@ -86,16 +86,12 @@ def _prepare_slice(
     if gaussian_sigma > 0:
         arr = ndimage.gaussian_filter(arr, sigma=gaussian_sigma, mode="reflect")
 
-    # Apply clipping
-    if clip_percent > 0:
-        if normalization_mode == "percentile":
-            # For percentile mode, we'll use 1st-99th percentile in normalization
-            pass
-        else:
-            lower = np.percentile(arr, clip_percent)
-            upper = np.percentile(arr, 100 - clip_percent)
-            if upper > lower:
-                arr = np.clip(arr, lower, upper)
+    # Apply clipping (for non-percentile modes; percentile mode handles it during normalization)
+    if clip_percent > 0 and normalization_mode != "percentile":
+        lower = np.percentile(arr, clip_percent)
+        upper = np.percentile(arr, 100 - clip_percent)
+        if upper > lower:
+            arr = np.clip(arr, lower, upper)
 
     # Apply normalization
     if normalize:
@@ -127,12 +123,16 @@ def _prepare_slice(
                     arr = np.zeros_like(arr, dtype=np.float32)
         
         elif normalization_mode == "percentile":
-            # Use 1st-99th percentile for robust normalization
-            p1 = float(np.percentile(arr, 1))
-            p99 = float(np.percentile(arr, 99))
-            if p99 > p1:
-                arr = np.clip(arr, p1, p99)
-                arr = (arr - p1) / (p99 - p1)
+            # Use percentile-based normalization
+            # When clip_percent > 0, use it as the percentile bounds
+            # Otherwise default to 1st-99th percentile
+            lower_p = clip_percent if clip_percent > 0 else 1
+            upper_p = 100 - clip_percent if clip_percent > 0 else 99
+            p_low = float(np.percentile(arr, lower_p))
+            p_high = float(np.percentile(arr, upper_p))
+            if p_high > p_low:
+                arr = np.clip(arr, p_low, p_high)
+                arr = (arr - p_low) / (p_high - p_low)
             else:
                 arr = np.zeros_like(arr, dtype=np.float32)
 

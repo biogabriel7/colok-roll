@@ -55,10 +55,14 @@ def compute_focus_scores(
     normalization_mode:
         Normalization strategy. ``"per_slice"`` (default) normalizes each slice
         independently; ``"per_stack"`` uses global min/max across Z;
-        ``"percentile"`` uses 1st-99th percentile range per slice.
+        ``"percentile"`` uses percentile-based normalization per slice.
     clip_percent:
-        Symmetric percentile clipping applied before normalisation. For example,
-        ``clip_percent=1`` clips to the 1st–99th percentile range.
+        Symmetric percentile clipping. For ``"per_slice"`` and ``"per_stack"``
+        modes, clipping is applied before normalization. For example,
+        ``clip_percent=1`` clips to the 1st–99th percentile range before
+        normalizing. For ``"percentile"`` mode, ``clip_percent`` defines the
+        percentile bounds used for both clipping and normalization; if
+        ``clip_percent=0``, defaults to 1st–99th percentile.
     border_width:
         Width of border (in pixels) to mask out before scoring. Helps avoid
         coverslip and edge artifacts. Default 0 (no masking).

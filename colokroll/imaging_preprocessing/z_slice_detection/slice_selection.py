@@ -111,6 +111,12 @@ def detect_slices_to_keep(
     dict:
         Dictionary with keys: ``"scores"``, ``"smoothed_scores"``, ``"mask_keep"``,
         ``"indices_keep"``, ``"indices_remove"``, ``"threshold_used"``, ``"strategy"``.
+        
+        For ``"relative"`` and ``"percentile"`` strategies, ``"threshold_used"``
+        is the computed threshold value (slices with scores below this are kept).
+        For ``"topk"``, it is the maximum score among kept slices.
+        For ``"closest_to_peak"``, it is the minimum score among kept slices
+        (the effective lower boundary for the kept slices).
     """
 
     scores = np.asarray(scores, dtype=np.float32)
@@ -152,6 +158,10 @@ def detect_slices_to_keep(
         peak_idx = int(np.argmax(smoothed))
         peak_score = float(smoothed[peak_idx])
         
+        # We track the *decision* threshold in score space so `threshold_used`
+        # has consistent semantics across strategies: the minimum score among
+        # kept slices (i.e., the effective lower boundary).
+        
         # Automatic determination if keep_top not specified
         if keep_top is None:
             # Keep all slices with scores >= auto_keep_fraction * peak_score
@@ -173,13 +183,16 @@ def detect_slices_to_keep(
             mask_keep = np.zeros_like(smoothed, dtype=bool)
             mask_keep[indices_keep] = True
             
+            # Effective decision boundary: lowest score among kept slices
+            decision_threshold = float(np.min(smoothed[indices_keep]))
+            
             return {
                 "scores": scores,
                 "smoothed_scores": smoothed,
                 "mask_keep": mask_keep,
                 "indices_keep": indices_keep,
                 "indices_remove": indices_remove,
-                "threshold_used": score_threshold,
+                "threshold_used": decision_threshold,
                 "strategy": strategy,
             }
         
@@ -196,13 +209,17 @@ def detect_slices_to_keep(
         indices_remove = np.sort(keep_order[keep_top:])
         mask_keep = np.zeros_like(smoothed, dtype=bool)
         mask_keep[indices_keep] = True
+        
+        # Effective decision boundary: lowest score among kept slices
+        decision_threshold = float(np.min(smoothed[indices_keep]))
+        
         return {
             "scores": scores,
             "smoothed_scores": smoothed,
             "mask_keep": mask_keep,
             "indices_keep": indices_keep,
             "indices_remove": indices_remove,
-            "threshold_used": float(np.max(smoothed[indices_keep])),
+            "threshold_used": decision_threshold,
             "strategy": strategy,
         }
     else:

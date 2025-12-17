@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Optional, Tuple, Union
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ..focus_measure_quality import FocusMeasureQuality
@@ -135,10 +138,10 @@ def auto_select_best_method(
         methods = ["laplacian", "tenengrad", "fft", "combined"]
     
     if verbose:
-        print(f"🔍 Auto-selecting best focus method from {methods}...")
-        print(f"   Ranking by: {ranking_metric}")
+        logger.info("Auto-selecting best focus method from %s...", methods)
+        logger.info("   Ranking by: %s", ranking_metric)
         if require_unimodal:
-            print(f"   Constraint: Unimodal curves only")
+            logger.info("   Constraint: Unimodal curves only")
     
     # Benchmark all methods
     results = benchmark_focus_methods(
@@ -155,13 +158,13 @@ def auto_select_best_method(
     for method, result in results.items():
         if require_unimodal and not result.quality_metrics.is_unimodal:
             if verbose:
-                print(f"   ✗ {method}: Excluded (non-unimodal)")
+                logger.info("   %s: Excluded (non-unimodal)", method)
             continue
         candidates[method] = result
     
     if not candidates:
         if verbose:
-            print(f"   ⚠ No unimodal methods found, using all methods")
+            logger.warning("No unimodal methods found, using all methods")
         candidates = results
     
     # Rank methods by quality metric
@@ -225,25 +228,25 @@ def auto_select_best_method(
             f"Choose from: 'Rsg', 'Ws', 'Cp', 'composite'"
         )
     
-    # Print ranking if verbose
+    # Log ranking if verbose
     if verbose:
-        print(f"\n   Method Ranking:")
-        print(f"   {'Rank':<6} {'Method':<12} {'Rsg':<8} {'Ws (µm)':<9} {'Cp':<9} {'Unimodal'}")
-        print(f"   {'-'*60}")
+        logger.info("Method Ranking:")
+        logger.info("   %s %s %s %s %s", "Rank".ljust(6), "Method".ljust(12), "Rsg".ljust(8), "Ws (µm)".ljust(9), "Cp".ljust(9) + " Unimodal")
+        logger.info("   %s", "-" * 60)
         for i, (method, result) in enumerate(ranked, 1):
             q = result.quality_metrics
             uni = "Yes" if q.is_unimodal else "No"
-            marker = "→" if i == 1 else " "
-            print(f"   {marker} {i:<4} {method:<12} {q.Rsg:<8.3f} {q.Ws:<9.2f} {q.Cp:<9.4f} {uni}")
+            marker = ">" if i == 1 else " "
+            logger.info("   %s %s %s %.3f    %.2f      %.4f    %s", marker, str(i).ljust(4), method.ljust(12), q.Rsg, q.Ws, q.Cp, uni)
     
     # Select best method
     best_method_name, best_result = ranked[0]
     
     if verbose:
-        print(f"\n✓ Selected method: {best_method_name}")
+        logger.info("Selected method: %s", best_method_name)
         q = best_result.quality_metrics
-        print(f"  Rsg={q.Rsg:.3f}, Ws={q.Ws:.2f} µm, Cp={q.Cp:.4f}")
-        print(f"  Kept {len(best_result.indices_keep)}/{len(best_result.scores_agg)} slices: {list(best_result.indices_keep)}")
+        logger.info("  Rsg=%.3f, Ws=%.2f µm, Cp=%.4f", q.Rsg, q.Ws, q.Cp)
+        logger.info("  Kept %d/%d slices: %s", len(best_result.indices_keep), len(best_result.scores_agg), list(best_result.indices_keep))
     
     return best_result
 
@@ -433,14 +436,16 @@ def compare_strategies(
         ]
     
     # Run all strategies
-    print(f"Comparing {len(strategies)} strategies...")
+    logger.info("Comparing %d strategies...", len(strategies))
     results = {}
     strategy_names = []
     
     for i, config in enumerate(strategies, 1):
+        # Copy config to avoid mutating caller's dict
+        config = {**config}
         name = config.pop("name", f"Strategy {i}")
         strategy_names.append(name)
-        print(f"  [{i}/{len(strategies)}] Running: {name}")
+        logger.info("  [%d/%d] Running: %s", i, len(strategies), name)
         
         # Add quality computation parameters if requested
         if compute_quality:
@@ -451,7 +456,7 @@ def compare_strategies(
         result = select_z_slices(img, axes=axes, **config)
         results[name] = result
         
-        print(f"    → Kept {len(result.indices_keep)} / {len(result.scores_agg)} slices")
+        logger.info("    Kept %d / %d slices", len(result.indices_keep), len(result.scores_agg))
     
     # Build comparison matrices
     n_slices = len(next(iter(results.values())).scores_agg)
@@ -491,9 +496,9 @@ def compare_strategies(
         
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        print(f"\nGenerating comparison visualizations in {output_dir}...")
+        logger.info("Generating comparison visualizations in %s...", output_dir)
         plot_strategy_comparison(img, comparison_result, output_dir, axes)
-        print("✓ Comparison complete!")
+        logger.info("Comparison complete!")
     
     return comparison_result
 
