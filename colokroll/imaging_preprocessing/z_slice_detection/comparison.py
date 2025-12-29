@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -45,6 +45,116 @@ class StrategyComparisonResult:
     n_slices: int
     n_strategies: int
     quality_comparison: Optional[Dict[str, "FocusMeasureQuality"]] = None
+
+
+def select_z_slices_auto_method(
+    img: np.ndarray,
+    *,
+    axes: Optional[str] = None,
+    methods: Optional[List[str]] = None,
+    step_distance: float = 1.0,
+    n_fitting_points: int = 5,
+    ranking_metric: str = "Rsg",
+    require_unimodal: bool = False,
+    verbose: bool = False,
+    **kwargs: Any,
+) -> Tuple["ZSliceSelectionResult", Dict[str, Any]]:
+    """
+    Convenience wrapper: auto-select the best focus method and return diagnostics.
+
+    This is a compatibility/helper API for notebook workflows that want
+    ``(result, info)`` rather than only the ``ZSliceSelectionResult``.
+
+    Parameters are the same as ``auto_select_best_method()`` / ``benchmark_focus_methods()``,
+    plus any ``select_z_slices()`` kwargs (e.g., ``strategy``, ``smooth``, ``auto_keep_fraction``).
+    """
+    results = benchmark_focus_methods(
+        img,
+        axes=axes,
+        methods=methods,
+        step_distance=step_distance,
+        n_fitting_points=n_fitting_points,
+        **kwargs,
+    )
+
+    # Filter by unimodality if required
+    candidates: Dict[str, "ZSliceSelectionResult"] = {}
+    for method, result in results.items():
+        if require_unimodal and result.quality_metrics is not None and not result.quality_metrics.is_unimodal:
+            continue
+        candidates[method] = result
+
+    if not candidates:
+        candidates = results
+
+    # Rank methods by the requested quality metric
+    if ranking_metric == "Rsg":
+        ranked = sorted(
+            candidates.items(),
+            key=lambda x: x[1].quality_metrics.Rsg if x[1].quality_metrics else float("-inf"),
+            reverse=True,
+        )
+    elif ranking_metric == "Ws":
+        ranked = sorted(
+            candidates.items(),
+            key=lambda x: x[1].quality_metrics.Ws if x[1].quality_metrics else float("inf"),
+            reverse=False,
+        )
+    elif ranking_metric == "Cp":
+        ranked = sorted(
+            candidates.items(),
+            key=lambda x: x[1].quality_metrics.Cp if x[1].quality_metrics else float("-inf"),
+            reverse=True,
+        )
+    elif ranking_metric == "composite":
+        # Composite score = (2*Rsg_norm + Cp_norm) - Ws_norm
+        qs = {m: r.quality_metrics for m, r in candidates.items() if r.quality_metrics is not None}
+        if not qs:
+            ranked = list(candidates.items())
+        else:
+            rsg_vals = [q.Rsg for q in qs.values()]
+            ws_vals = [q.Ws for q in qs.values()]
+            cp_vals = [q.Cp for q in qs.values()]
+            rsg_min, rsg_max = min(rsg_vals), max(rsg_vals)
+            ws_min, ws_max = min(ws_vals), max(ws_vals)
+            cp_min, cp_max = min(cp_vals), max(cp_vals)
+
+            composite: Dict[str, float] = {}
+            for m, q in qs.items():
+                rsg_norm = (q.Rsg - rsg_min) / (rsg_max - rsg_min) if rsg_max > rsg_min else 1.0
+                ws_norm = (q.Ws - ws_min) / (ws_max - ws_min) if ws_max > ws_min else 0.0
+                cp_norm = (q.Cp - cp_min) / (cp_max - cp_min) if cp_max > cp_min else 1.0
+                composite[m] = (2.0 * rsg_norm + cp_norm) - ws_norm
+
+            ranked = sorted(candidates.items(), key=lambda x: composite.get(x[0], float("-inf")), reverse=True)
+    else:
+        raise ValueError("Unknown ranking_metric. Choose from: 'Rsg', 'Ws', 'Cp', 'composite'")
+
+    best_method, best_result = ranked[0]
+
+    if verbose:
+        # Reuse the existing function for its logging behavior
+        best_result = auto_select_best_method(
+            img,
+            axes=axes,
+            methods=methods,
+            step_distance=step_distance,
+            n_fitting_points=n_fitting_points,
+            ranking_metric=ranking_metric,
+            require_unimodal=require_unimodal,
+            verbose=True,
+            **kwargs,
+        )
+        best_method = best_result.method  # type: ignore[assignment]
+
+    info: Dict[str, Any] = {
+        "selected_method": best_method,
+        "ranking_metric": ranking_metric,
+        "require_unimodal": require_unimodal,
+        "ranked_methods": [m for m, _ in ranked],
+        "results_by_method": results,
+    }
+    return best_result, info
 
 
 def auto_select_best_method(
@@ -333,6 +443,7 @@ def compare_strategies(
     strategies: Optional[list] = None,
     output_path: Optional[Union[str, Path]] = None,
     save_plots: bool = True,
+    display_inline: bool = False,
     compute_quality: bool = False,
     step_distance: float = 1.0,
     n_fitting_points: int = 5,
@@ -497,7 +608,7 @@ def compare_strategies(
         output_dir.mkdir(parents=True, exist_ok=True)
         
         logger.info("Generating comparison visualizations in %s...", output_dir)
-        plot_strategy_comparison(img, comparison_result, output_dir, axes)
+        plot_strategy_comparison(img, comparison_result, output_dir, axes, display_inline=display_inline)
         logger.info("Comparison complete!")
     
     return comparison_result

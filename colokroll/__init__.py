@@ -31,6 +31,7 @@ from .imaging_preprocessing import (
     compute_focus_scores,
     detect_slices_to_keep,
     select_z_slices,
+    select_z_slices_auto_method,
     compare_strategies,
 )
 
@@ -77,6 +78,7 @@ __all__ = [
     "compute_focus_scores",
     "detect_slices_to_keep",
     "select_z_slices",
+    "select_z_slices_auto_method",
     "compare_strategies",
     
     # Visualization

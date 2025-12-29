@@ -159,6 +159,8 @@ def plot_strategy_comparison(
     comparison: "StrategyComparisonResult",
     output_dir: Path,
     axes: Optional[str],
+    *,
+    display_inline: bool = False,
 ) -> None:
     """Generate comparison visualizations for multiple strategies.
     
@@ -222,18 +224,47 @@ def plot_strategy_comparison(
     ax1.set_yticks(np.arange(comparison.n_slices + 1) - 0.5, minor=True)
     ax1.grid(which='minor', color='white', linestyle='-', linewidth=1)
     
-    # Add text annotations
+    # Add text annotations.
+    # By default we show just ✓/✗. For small-ish comparisons we also include the score
+    # to make it easy to visually validate thresholds/strategies (not just decisions).
+    annotate_scores = (comparison.n_slices <= 60 and comparison.n_strategies <= 14)
     for i in range(comparison.n_slices):
         for j in range(comparison.n_strategies):
-            text = '✓' if comparison.decision_matrix[i, j] else '✗'
-            ax1.text(j, i, text, ha='center', va='center', color='white',
-                    fontsize=7, fontweight='bold')
+            keep = bool(comparison.decision_matrix[i, j])
+            mark = "✓" if keep else "✗"
+            if annotate_scores:
+                score = float(comparison.score_matrix[i, j])
+                text = f"{mark}\n{score:.4f}"
+                fontsize = 6
+            else:
+                text = mark
+                fontsize = 7
+            ax1.text(
+                j,
+                i,
+                text,
+                ha="center",
+                va="center",
+                color="white",
+                fontsize=fontsize,
+                fontweight="bold",
+                linespacing=0.9,
+            )
     
     plt.tight_layout()
     out_path1 = output_dir / "decision_matrix_heatmap.png"
     fig1.savefig(out_path1, dpi=300, bbox_inches='tight')
     plt.close(fig1)
     print(f"    ✓ Saved: {out_path1}")
+
+    if display_inline:
+        try:
+            from IPython.display import Image as _IPyImage, display as _display  # type: ignore
+
+            _display(_IPyImage(filename=str(out_path1)))
+        except Exception:
+            # If IPython isn't available (or we're not in a notebook), just skip inline display.
+            pass
     
     # 2. Generate slice gallery
     print("  - Creating slice gallery...")
@@ -264,6 +295,14 @@ def plot_strategy_comparison(
     fig2.savefig(out_path2, dpi=200)
     plt.close(fig2)
     print(f"    ✓ Saved: {out_path2}")
+
+    if display_inline:
+        try:
+            from IPython.display import Image as _IPyImage, display as _display  # type: ignore
+
+            _display(_IPyImage(filename=str(out_path2)))
+        except Exception:
+            pass
     
     # 3. Generate summary table
     print("  - Creating strategy summary...")

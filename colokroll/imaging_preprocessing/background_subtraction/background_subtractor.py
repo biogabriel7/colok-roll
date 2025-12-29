@@ -273,7 +273,7 @@ class BackgroundSubtractor:
         
         if method == 'auto':
             self.logger.info("Running AUTO background subtraction (channel=%s)", channel_name or "unknown")
-            return self._auto_subtract_background(image, channel_name, pixel_size)
+            return self._auto_subtract_background(image, channel_name, pixel_size, **kwargs)
         
         # Route to appropriate backend via adapter
         channel_label = channel_name or "unknown"
@@ -1061,7 +1061,28 @@ class BackgroundSubtractor:
                     tested[k] = tested[k][-TESTED_VALUES_MAX:]
         return tested
 
-    def _auto_subtract_background(self, image: np.ndarray, channel_name: Optional[str], pixel_size: Optional[float]) -> Tuple[np.ndarray, Dict[str, Any]]:
+    def _auto_subtract_background(
+        self,
+        image: np.ndarray,
+        channel_name: Optional[str],
+        pixel_size: Optional[float],
+        **kwargs: Any,
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """
+        Automatic background subtraction via per-method zoom search.
+
+        Cache behavior:
+        - On cache hit, by default we first try the cached best (method, params) on the sampled slices.
+          If it validates (score close to cached score), we skip the zoom search and apply it to the full volume.
+        - You can disable this fast path by passing `auto_use_cache_best=False`.
+
+        Args:
+            auto_use_cache_best: If True (default), attempt cached best params first and potentially skip search.
+            auto_cache_score_tolerance: Accept cached best if sample score >= cached_best_score - tolerance (default: 0.05).
+        """
+        auto_use_cache_best = bool(kwargs.pop("auto_use_cache_best", True))
+        auto_cache_score_tolerance = float(kwargs.pop("auto_cache_score_tolerance", 0.05))
+
         channel_key = self._normalize_channel_key(channel_name)
         cache = self._load_auto_cache()
         channel_entry = cache.get("channels", {}).get(channel_key, {})
@@ -1070,6 +1091,62 @@ class BackgroundSubtractor:
         sample_idx = self._select_sample_indices(z)
         image_sample = image[sample_idx]
         weights = self.auto_weights
+
+        # Fast path: on cache hit, try cached best params first and skip zoom search if validated.
+        cached_best_method: Optional[str] = None
+        cached_best_params: Optional[Dict[str, Any]] = None
+        cached_best_score: Optional[float] = None
+        if auto_use_cache_best and channel_entry:
+            methods_cache = channel_entry.get("methods", {})
+            for m, entry in methods_cache.items():
+                if m not in AUTO_METHODS:
+                    continue
+                p = entry.get("best_params")
+                s = entry.get("best_score")
+                if p is None or s is None:
+                    continue
+                try:
+                    s_f = float(s)
+                except Exception:
+                    continue
+                if cached_best_score is None or s_f > cached_best_score:
+                    cached_best_score = s_f
+                    cached_best_method = m
+                    cached_best_params = p
+
+        if cached_best_method and cached_best_params and cached_best_score is not None:
+            corrected_sample, _ = self._run_single(image_sample, cached_best_method, cached_best_params, channel_name, pixel_size)
+            self._sync_backend()
+            score, comps = self._score_volume(image_sample, corrected_sample, weights, max_slices=min(5, len(sample_idx)))
+            std_penalty = False
+            if comps["corr_std"] < MIN_STD_ABS or comps["corr_std"] < MIN_STD_RATIO * max(comps["orig_std"], 1e-6):
+                score = -1e6
+                std_penalty = True
+
+            if (not std_penalty) and score >= (cached_best_score - auto_cache_score_tolerance):
+                corrected_full, metadata = self._run_single(image, cached_best_method, cached_best_params, channel_name, pixel_size)
+                method_suffix = f'_{self.backend}' if self.backend != 'cpu' else ''
+                metadata.update(
+                    {
+                        "auto_selected": True,
+                        "auto_mode": "cache_best_fastpath",
+                        "auto_sample_indices": sample_idx.tolist(),
+                        "auto_cache_path": str(self.auto_cache_path),
+                        "auto_cache_hit": True,
+                        "auto_cache_used_best": True,
+                        "auto_cache_skip_search": True,
+                        "auto_cache_cached_best_score": float(cached_best_score),
+                        "auto_cache_validated_score": float(score),
+                        "auto_cache_score_tolerance": float(auto_cache_score_tolerance),
+                        "parameters_used": cached_best_params,
+                        "method": (
+                            f'gaussian+rolling_ball{method_suffix}'
+                            if cached_best_method in {"two_stage", "gaussian_then_rolling_ball"}
+                            else metadata.get("method", f"{cached_best_method}{method_suffix}")
+                        ),
+                    }
+                )
+                return corrected_full, metadata
 
         method_results: List[Dict[str, Any]] = []
         for method in AUTO_METHODS:
