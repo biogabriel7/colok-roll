@@ -90,7 +90,7 @@ class CellSegmenter:
     def __init__(
         self,
         cellpose_space: str = "mouseland/cellpose",
-        resize_candidates: Sequence[int] = (),
+        resize_candidates: Sequence[int] = (600,),
         *,
         auto_resize: bool = False,
         max_resize_cap: int = 600,
