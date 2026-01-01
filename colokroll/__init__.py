@@ -46,6 +46,8 @@ from .analysis import (
     compute_colocalization,
     export_colocalization_json,
     estimate_min_area_threshold,
+    compute_puncta,
+    export_puncta_json,
 )
 
 # Export all public components
