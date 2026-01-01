@@ -45,6 +45,13 @@ try:
 except ImportError:
     MIPCreator = None  # type: ignore
 
+try:
+    from bigfish import detection as bigfish_detection
+    HAS_BIGFISH = True
+except ImportError:  # pragma: no cover
+    bigfish_detection = None  # type: ignore
+    HAS_BIGFISH = False
+
 
 # =============================================================================
 # Module-level constants
@@ -408,6 +415,75 @@ def _segment_puncta_watershed(
     return labels.astype(np.int32)
 
 
+def _detect_spots_bigfish(
+    image: np.ndarray,
+    spot_radius_px: float,
+    cell_mask: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Detect spots using BigFISH with automatic thresholding.
+
+    BigFISH uses LoG filtering with automatic threshold detection based on
+    spot statistics, which is more robust than manual threshold selection.
+
+    Args:
+        image: 2D input image.
+        spot_radius_px: Expected spot radius in pixels (used for LoG sigma).
+        cell_mask: Optional labeled cell mask to restrict detection.
+
+    Returns:
+        Tuple of (spots array (N, 2) as (y, x), puncta_labels 2D array).
+    """
+    if not HAS_BIGFISH:
+        raise RuntimeError(
+            "BigFISH is required for this detection method. "
+            "Install with: pip install big-fish"
+        )
+
+    # BigFISH expects spot radius as tuple (z, y, x) or (y, x) for 2D
+    spot_radius = (spot_radius_px, spot_radius_px)
+
+    # Detect spots with automatic thresholding
+    # BigFISH's detect_spots uses LoG + automatic threshold
+    spots = bigfish_detection.detect_spots(
+        image.astype(np.float64),
+        threshold=None,  # Auto-threshold
+        spot_radius=spot_radius,
+    )
+
+    logger.info(f"BigFISH detected {len(spots)} spots with auto-threshold")
+
+    # Filter spots to only those within cell mask if provided
+    if cell_mask is not None:
+        mask_filter = np.array([
+            cell_mask[int(y), int(x)] > 0
+            for y, x in spots
+            if 0 <= int(y) < cell_mask.shape[0] and 0 <= int(x) < cell_mask.shape[1]
+        ])
+        spots = spots[mask_filter] if len(mask_filter) > 0 else spots
+        logger.info(f"After cell mask filtering: {len(spots)} spots")
+
+    # Create labeled mask from spots (simple dilation for now)
+    puncta_labels = np.zeros(image.shape, dtype=np.int32)
+    radius_int = max(1, int(round(spot_radius_px)))
+
+    for i, (y, x) in enumerate(spots, start=1):
+        y, x = int(y), int(x)
+        # Create small circular region around each spot
+        ymin = max(0, y - radius_int)
+        ymax = min(image.shape[0], y + radius_int + 1)
+        xmin = max(0, x - radius_int)
+        xmax = min(image.shape[1], x + radius_int + 1)
+
+        for dy in range(ymin, ymax):
+            for dx in range(xmin, xmax):
+                if (dy - y) ** 2 + (dx - x) ** 2 <= radius_int ** 2:
+                    if puncta_labels[dy, dx] == 0:  # Don't overwrite
+                        puncta_labels[dy, dx] = i
+
+    return spots, puncta_labels
+
+
 def _measure_puncta(
     image_raw: np.ndarray,
     puncta_labels: np.ndarray,
@@ -676,6 +752,7 @@ def compute_puncta(
     *,
     channel_names: Optional[List[str]] = None,
     projection: str = "mip",  # "mip" | "sme" | "none"
+    detection_method: str = "log",  # "log" | "bigfish"
     pixel_size_um: Optional[float] = None,
     expected_diameter_um: float = _DEFAULT_EXPECTED_DIAMETER_UM,
     min_diameter_um: float = _DEFAULT_MIN_DIAMETER_UM,
@@ -708,6 +785,9 @@ def compute_puncta(
             - "mip": Maximum intensity projection (default)
             - "sme": Surface manifold extraction
             - "none": Expect already 2D or use middle slice
+        detection_method: Spot detection algorithm to use:
+            - "log": Laplacian of Gaussian + watershed (default, requires scikit-image)
+            - "bigfish": BigFISH automatic thresholding (requires big-fish package)
         pixel_size_um: Pixel size in micrometers. Required for µm-based
             filtering and metrics.
         expected_diameter_um: Expected punctum diameter in µm (for LoG sigma).
@@ -791,8 +871,9 @@ def compute_puncta(
         max_area_px = int(math.pi * (max_diameter_px / 2) ** 2 * 2)  # 2x for safety margin
 
     logger.info(
-        f"Detection params: log_sigma={log_sigma:.2f}px, min_distance={min_distance_px:.2f}px, "
-        f"snr_threshold={snr_threshold}, min_area={min_area_px}px, max_area={max_area_px}px"
+        f"Detection params: method={detection_method}, log_sigma={log_sigma:.2f}px, "
+        f"min_distance={min_distance_px:.2f}px, snr_threshold={snr_threshold}, "
+        f"min_area={min_area_px}px, max_area={max_area_px}px"
     )
 
     # Step 1: Estimate background (within cell regions)
@@ -800,26 +881,46 @@ def compute_puncta(
     bg_mean, bg_std = _estimate_background_mad(image_2d, mask=cell_region_mask)
     logger.info(f"Background estimate: mean={bg_mean:.2f}, std={bg_std:.2f}")
 
-    # Step 2: LoG filter for blob enhancement
-    log_image = _laplacian_of_gaussian(image_2d, sigma=log_sigma)
+    # Step 2-5: Detection (method-dependent)
+    if detection_method.lower() == "bigfish":
+        # BigFISH detection with automatic thresholding
+        if not HAS_BIGFISH:
+            raise RuntimeError(
+                "BigFISH is required for detection_method='bigfish'. "
+                "Install with: pip install big-fish"
+            )
+        spot_radius_px = expected_diameter_px / 2.0
+        _spots, puncta_labels = _detect_spots_bigfish(
+            image_2d,
+            spot_radius_px=spot_radius_px,
+            cell_mask=cell_mask,
+        )
+    elif detection_method.lower() == "log":
+        # Original LoG + watershed method
+        # Step 2: LoG filter for blob enhancement
+        log_image = _laplacian_of_gaussian(image_2d, sigma=log_sigma)
 
-    # Step 3: Create foreground mask using SNR threshold
-    snr_image = (image_2d - bg_mean) / bg_std
-    foreground_mask = (snr_image >= snr_threshold) & cell_region_mask
+        # Step 3: Create foreground mask using SNR threshold
+        snr_image = (image_2d - bg_mean) / bg_std
+        foreground_mask = (snr_image >= snr_threshold) & cell_region_mask
 
-    # Step 4: Detect seeds (local maxima on LoG)
-    # Threshold LoG at 0 (enhanced blobs should be positive)
-    log_threshold = 0.0
-    seeds = _detect_puncta_seeds(
-        log_image,
-        min_distance=int(max(1, min_distance_px)),
-        threshold_abs=log_threshold,
-        mask=foreground_mask,
-    )
-    logger.info(f"Detected {len(seeds)} puncta seeds")
+        # Step 4: Detect seeds (local maxima on LoG)
+        log_threshold = 0.0
+        seeds = _detect_puncta_seeds(
+            log_image,
+            min_distance=int(max(1, min_distance_px)),
+            threshold_abs=log_threshold,
+            mask=foreground_mask,
+        )
+        logger.info(f"Detected {len(seeds)} puncta seeds")
 
-    # Step 5: Segment puncta via watershed
-    puncta_labels = _segment_puncta_watershed(image_2d, seeds, foreground_mask)
+        # Step 5: Segment puncta via watershed
+        puncta_labels = _segment_puncta_watershed(image_2d, seeds, foreground_mask)
+    else:
+        raise ValueError(
+            f"Unknown detection_method '{detection_method}'. "
+            "Supported: 'log', 'bigfish'"
+        )
 
     # Step 6: Filter by size
     if min_area_px > 0 or max_area_px is not None:
@@ -864,6 +965,7 @@ def compute_puncta(
         "projection": projection,
         "pixel_size_um": pixel_size_um,
         "detection_params": {
+            "detection_method": detection_method,
             "expected_diameter_um": expected_diameter_um,
             "min_diameter_um": min_diameter_um,
             "max_diameter_um": max_diameter_um,
