@@ -48,6 +48,7 @@ from .analysis import (
     estimate_min_area_threshold,
     compute_puncta,
     export_puncta_json,
+    plot_puncta_elbow,
 )
 
 # Export all public components
@@ -97,4 +98,5 @@ __all__ = [
     "estimate_min_area_threshold",
     "compute_puncta",
     "export_puncta_json",
+    "plot_puncta_elbow",
 ]

@@ -45,6 +45,13 @@ try:
 except ImportError:
     MIPCreator = None  # type: ignore
 
+try:
+    from bigfish import detection as bigfish_detection
+    HAS_BIGFISH = True
+except ImportError:  # pragma: no cover
+    bigfish_detection = None  # type: ignore
+    HAS_BIGFISH = False
+
 
 # =============================================================================
 # Module-level constants
@@ -408,6 +415,120 @@ def _segment_puncta_watershed(
     return labels.astype(np.int32)
 
 
+def _detect_spots_bigfish(
+    image: np.ndarray,
+    spot_radius_px: float,
+    cell_mask: Optional[np.ndarray] = None,
+    return_threshold_data: bool = False,
+) -> Union[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray, Dict[str, Any]]]:
+    """
+    Detect spots using BigFISH with automatic thresholding.
+
+    BigFISH uses LoG filtering with automatic threshold detection based on
+    spot statistics, which is more robust than manual threshold selection.
+
+    Args:
+        image: 2D input image.
+        spot_radius_px: Expected spot radius in pixels (used for LoG sigma).
+        cell_mask: Optional labeled cell mask to restrict detection.
+        return_threshold_data: If True, return elbow curve data for plotting.
+
+    Returns:
+        If return_threshold_data is False:
+            Tuple of (spots array (N, 2) as (y, x), puncta_labels 2D array).
+        If return_threshold_data is True:
+            Tuple of (spots, puncta_labels, threshold_data dict).
+            threshold_data contains: threshold, thresholds, spot_counts for elbow plot.
+    """
+    if not HAS_BIGFISH:
+        raise RuntimeError(
+            "BigFISH is required for this detection method. "
+            "Install with: pip install big-fish"
+        )
+
+    # Import additional BigFISH modules for threshold data
+    from bigfish import stack as bigfish_stack
+
+    # BigFISH expects spot radius as tuple (z, y, x) or (y, x) for 2D
+    spot_radius = (spot_radius_px, spot_radius_px)
+
+    # Step 1: Apply LoG filter
+    image_filtered = bigfish_stack.log_filter(
+        image.astype(np.float64),
+        sigma=spot_radius,
+    )
+
+    # Step 2: Detect local maxima
+    local_maxima = bigfish_detection.local_maximum_detection(
+        image_filtered,
+        min_distance=spot_radius,
+    )
+
+    # Step 3: Get threshold using automatic thresholding (elbow method)
+    # This returns spots AND threshold data
+    spots, threshold = bigfish_detection.spots_thresholding(
+        image_filtered,
+        local_maxima,
+        threshold=None,  # Auto-threshold
+    )
+
+    logger.info(f"BigFISH detected {len(spots)} spots with auto-threshold={threshold:.2f}")
+
+    # Compute elbow curve data if requested
+    threshold_data = None
+    if return_threshold_data:
+        # Generate threshold range for elbow curve
+        max_val = float(image_filtered.max())
+        min_val = float(image_filtered[image_filtered > 0].min()) if np.any(image_filtered > 0) else 0
+        thresholds = np.linspace(min_val, max_val, num=100)
+
+        # Count spots at each threshold
+        spot_counts = []
+        for t in thresholds:
+            count = int(np.sum(image_filtered[local_maxima[:, 0], local_maxima[:, 1]] >= t))
+            spot_counts.append(count)
+
+        threshold_data = {
+            "threshold": float(threshold),
+            "thresholds": thresholds.tolist(),
+            "spot_counts": spot_counts,
+            "local_maxima_count": len(local_maxima),
+            "filtered_spots_count": len(spots),
+        }
+
+    # Filter spots to only those within cell mask if provided
+    if cell_mask is not None:
+        mask_filter = np.array([
+            cell_mask[int(y), int(x)] > 0
+            for y, x in spots
+            if 0 <= int(y) < cell_mask.shape[0] and 0 <= int(x) < cell_mask.shape[1]
+        ])
+        spots = spots[mask_filter] if len(mask_filter) > 0 else spots
+        logger.info(f"After cell mask filtering: {len(spots)} spots")
+
+    # Create labeled mask from spots (simple dilation for now)
+    puncta_labels = np.zeros(image.shape, dtype=np.int32)
+    radius_int = max(1, int(round(spot_radius_px)))
+
+    for i, (y, x) in enumerate(spots, start=1):
+        y, x = int(y), int(x)
+        # Create small circular region around each spot
+        ymin = max(0, y - radius_int)
+        ymax = min(image.shape[0], y + radius_int + 1)
+        xmin = max(0, x - radius_int)
+        xmax = min(image.shape[1], x + radius_int + 1)
+
+        for dy in range(ymin, ymax):
+            for dx in range(xmin, xmax):
+                if (dy - y) ** 2 + (dx - x) ** 2 <= radius_int ** 2:
+                    if puncta_labels[dy, dx] == 0:  # Don't overwrite
+                        puncta_labels[dy, dx] = i
+
+    if return_threshold_data:
+        return spots, puncta_labels, threshold_data
+    return spots, puncta_labels
+
+
 def _measure_puncta(
     image_raw: np.ndarray,
     puncta_labels: np.ndarray,
@@ -676,6 +797,7 @@ def compute_puncta(
     *,
     channel_names: Optional[List[str]] = None,
     projection: str = "mip",  # "mip" | "sme" | "none"
+    detection_method: str = "log",  # "log" | "bigfish"
     pixel_size_um: Optional[float] = None,
     expected_diameter_um: float = _DEFAULT_EXPECTED_DIAMETER_UM,
     min_diameter_um: float = _DEFAULT_MIN_DIAMETER_UM,
@@ -685,6 +807,7 @@ def compute_puncta(
     min_area_px: int = 4,
     max_area_px: Optional[int] = None,
     drop_label_1: bool = True,
+    return_threshold_data: bool = False,
     output_json: Optional[Union[str, Path]] = None,
 ) -> Dict[str, Any]:
     """
@@ -708,6 +831,9 @@ def compute_puncta(
             - "mip": Maximum intensity projection (default)
             - "sme": Surface manifold extraction
             - "none": Expect already 2D or use middle slice
+        detection_method: Spot detection algorithm to use:
+            - "log": Laplacian of Gaussian + watershed (default, requires scikit-image)
+            - "bigfish": BigFISH automatic thresholding (requires big-fish package)
         pixel_size_um: Pixel size in micrometers. Required for µm-based
             filtering and metrics.
         expected_diameter_um: Expected punctum diameter in µm (for LoG sigma).
@@ -720,6 +846,8 @@ def compute_puncta(
         max_area_px: Maximum punctum area in pixels. If None, computed from
             max_diameter_um.
         drop_label_1: If True, remove cell label 1 from mask (Cellpose background).
+        return_threshold_data: If True and detection_method="bigfish", include
+            elbow curve data in the result for visualization. Ignored for "log".
         output_json: Optional path to save results as JSON.
 
     Returns:
@@ -730,6 +858,7 @@ def compute_puncta(
             "projection": str,
             "pixel_size_um": float or None,
             "detection_params": {...},
+            "threshold_data": {...},  # Only if return_threshold_data=True and bigfish
             "results": {
                 "puncta": [...],  # per-punctum metrics
                 "per_label": [...],  # per-cell aggregates
@@ -791,8 +920,9 @@ def compute_puncta(
         max_area_px = int(math.pi * (max_diameter_px / 2) ** 2 * 2)  # 2x for safety margin
 
     logger.info(
-        f"Detection params: log_sigma={log_sigma:.2f}px, min_distance={min_distance_px:.2f}px, "
-        f"snr_threshold={snr_threshold}, min_area={min_area_px}px, max_area={max_area_px}px"
+        f"Detection params: method={detection_method}, log_sigma={log_sigma:.2f}px, "
+        f"min_distance={min_distance_px:.2f}px, snr_threshold={snr_threshold}, "
+        f"min_area={min_area_px}px, max_area={max_area_px}px"
     )
 
     # Step 1: Estimate background (within cell regions)
@@ -800,26 +930,55 @@ def compute_puncta(
     bg_mean, bg_std = _estimate_background_mad(image_2d, mask=cell_region_mask)
     logger.info(f"Background estimate: mean={bg_mean:.2f}, std={bg_std:.2f}")
 
-    # Step 2: LoG filter for blob enhancement
-    log_image = _laplacian_of_gaussian(image_2d, sigma=log_sigma)
+    # Step 2-5: Detection (method-dependent)
+    threshold_data = None
+    if detection_method.lower() == "bigfish":
+        # BigFISH detection with automatic thresholding
+        if not HAS_BIGFISH:
+            raise RuntimeError(
+                "BigFISH is required for detection_method='bigfish'. "
+                "Install with: pip install big-fish"
+            )
+        spot_radius_px = expected_diameter_px / 2.0
+        if return_threshold_data:
+            _spots, puncta_labels, threshold_data = _detect_spots_bigfish(
+                image_2d,
+                spot_radius_px=spot_radius_px,
+                cell_mask=cell_mask,
+                return_threshold_data=True,
+            )
+        else:
+            _spots, puncta_labels = _detect_spots_bigfish(
+                image_2d,
+                spot_radius_px=spot_radius_px,
+                cell_mask=cell_mask,
+            )
+    elif detection_method.lower() == "log":
+        # Original LoG + watershed method
+        # Step 2: LoG filter for blob enhancement
+        log_image = _laplacian_of_gaussian(image_2d, sigma=log_sigma)
 
-    # Step 3: Create foreground mask using SNR threshold
-    snr_image = (image_2d - bg_mean) / bg_std
-    foreground_mask = (snr_image >= snr_threshold) & cell_region_mask
+        # Step 3: Create foreground mask using SNR threshold
+        snr_image = (image_2d - bg_mean) / bg_std
+        foreground_mask = (snr_image >= snr_threshold) & cell_region_mask
 
-    # Step 4: Detect seeds (local maxima on LoG)
-    # Threshold LoG at 0 (enhanced blobs should be positive)
-    log_threshold = 0.0
-    seeds = _detect_puncta_seeds(
-        log_image,
-        min_distance=int(max(1, min_distance_px)),
-        threshold_abs=log_threshold,
-        mask=foreground_mask,
-    )
-    logger.info(f"Detected {len(seeds)} puncta seeds")
+        # Step 4: Detect seeds (local maxima on LoG)
+        log_threshold = 0.0
+        seeds = _detect_puncta_seeds(
+            log_image,
+            min_distance=int(max(1, min_distance_px)),
+            threshold_abs=log_threshold,
+            mask=foreground_mask,
+        )
+        logger.info(f"Detected {len(seeds)} puncta seeds")
 
-    # Step 5: Segment puncta via watershed
-    puncta_labels = _segment_puncta_watershed(image_2d, seeds, foreground_mask)
+        # Step 5: Segment puncta via watershed
+        puncta_labels = _segment_puncta_watershed(image_2d, seeds, foreground_mask)
+    else:
+        raise ValueError(
+            f"Unknown detection_method '{detection_method}'. "
+            "Supported: 'log', 'bigfish'"
+        )
 
     # Step 6: Filter by size
     if min_area_px > 0 or max_area_px is not None:
@@ -864,6 +1023,7 @@ def compute_puncta(
         "projection": projection,
         "pixel_size_um": pixel_size_um,
         "detection_params": {
+            "detection_method": detection_method,
             "expected_diameter_um": expected_diameter_um,
             "min_diameter_um": min_diameter_um,
             "max_diameter_um": max_diameter_um,
@@ -882,6 +1042,10 @@ def compute_puncta(
             "summary": summary,
         },
     }
+
+    # Add threshold data if available (BigFISH with return_threshold_data=True)
+    if threshold_data is not None:
+        result["threshold_data"] = threshold_data
 
     # Optionally save to JSON
     if output_json is not None:
@@ -928,9 +1092,113 @@ def export_puncta_json(result: Dict[str, Any], out_path: Union[str, Path]) -> No
     logger.info(f"Wrote puncta JSON to {out_path}")
 
 
+def plot_puncta_elbow(
+    result: Dict[str, Any],
+    ax: Optional[Any] = None,
+    figsize: Tuple[float, float] = (8, 5),
+    title: Optional[str] = None,
+) -> Any:
+    """
+    Plot the elbow curve from BigFISH threshold detection.
+
+    This shows the relationship between threshold value and number of detected
+    spots, with the automatically selected threshold marked.
+
+    Args:
+        result: Output from compute_puncta() with return_threshold_data=True.
+        ax: Optional matplotlib axes. If None, creates a new figure.
+        figsize: Figure size if creating new figure.
+        title: Optional title for the plot.
+
+    Returns:
+        matplotlib axes object.
+
+    Raises:
+        ValueError: If result doesn't contain threshold_data.
+
+    Example:
+        >>> result = compute_puncta(
+        ...     image, mask, "ALIX",
+        ...     detection_method="bigfish",
+        ...     return_threshold_data=True,
+        ... )
+        >>> plot_puncta_elbow(result)
+        >>> plt.show()
+    """
+    if "threshold_data" not in result:
+        raise ValueError(
+            "Result does not contain threshold_data. "
+            "Use compute_puncta(..., detection_method='bigfish', return_threshold_data=True)"
+        )
+
+    threshold_data = result["threshold_data"]
+    thresholds = threshold_data["thresholds"]
+    spot_counts = threshold_data["spot_counts"]
+    selected_threshold = threshold_data["threshold"]
+
+    # Import matplotlib lazily
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        raise RuntimeError("matplotlib is required for plotting. Install with: pip install matplotlib")
+
+    # Create axes if needed
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+
+    # Plot the elbow curve
+    ax.plot(thresholds, spot_counts, "b-", linewidth=2, label="Spot count vs threshold")
+
+    # Mark the selected threshold
+    # Find the spot count at the selected threshold
+    selected_idx = np.argmin(np.abs(np.array(thresholds) - selected_threshold))
+    selected_count = spot_counts[selected_idx]
+
+    ax.axvline(
+        x=selected_threshold,
+        color="r",
+        linestyle="--",
+        linewidth=1.5,
+        label=f"Auto threshold: {selected_threshold:.1f}",
+    )
+    ax.scatter(
+        [selected_threshold],
+        [selected_count],
+        color="r",
+        s=100,
+        zorder=5,
+        marker="o",
+    )
+
+    # Labels and formatting
+    ax.set_xlabel("Threshold (LoG-filtered intensity)", fontsize=11)
+    ax.set_ylabel("Number of spots detected", fontsize=11)
+
+    if title is None:
+        channel = result.get("channel", "Unknown")
+        title = f"BigFISH Elbow Curve - {channel}"
+    ax.set_title(title, fontsize=12)
+
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+
+    # Add annotation for final count
+    final_count = threshold_data.get("filtered_spots_count", selected_count)
+    ax.annotate(
+        f"Detected: {final_count} spots",
+        xy=(0.02, 0.02),
+        xycoords="axes fraction",
+        fontsize=10,
+        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
+    )
+
+    return ax
+
+
 __all__ = [
     "compute_puncta",
     "export_puncta_json",
+    "plot_puncta_elbow",
 ]
 
 
