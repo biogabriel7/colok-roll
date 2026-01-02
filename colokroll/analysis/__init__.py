@@ -10,6 +10,7 @@ from .colocalization import (
 from .puncta import (
     compute_puncta,
     export_puncta_json,
+    plot_puncta_elbow,
 )
 
 __all__ = [
@@ -21,4 +22,5 @@ __all__ = [
     "estimate_min_area_threshold",
     "compute_puncta",
     "export_puncta_json",
+    "plot_puncta_elbow",
 ]
