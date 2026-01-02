@@ -249,6 +249,7 @@ class BackgroundSubtractor:
         channel_name: Optional[str] = None,
         pixel_size: Optional[float] = None,
         chunk_size: Optional[int] = None,
+        is_negative_control: bool = False,
         **kwargs
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
@@ -261,6 +262,8 @@ class BackgroundSubtractor:
             channel_name: Name of the channel for automatic parameter selection
             pixel_size: Pixel size in micrometers for micron-based parameters
             chunk_size: Number of z-slices to process at once for memory efficiency
+            is_negative_control: If True, optimize for minimal residual signal instead of
+                               preserving features. Use for channels where no signal is expected.
             **kwargs: Additional method-specific parameters
             
         Returns:
@@ -272,8 +275,10 @@ class BackgroundSubtractor:
         method = method or 'auto'
         
         if method == 'auto':
-            self.logger.info("Running AUTO background subtraction (channel=%s)", channel_name or "unknown")
-            return self._auto_subtract_background(image, channel_name, pixel_size, **kwargs)
+            self.logger.info("Running AUTO background subtraction (channel=%s, negative_control=%s)", 
+                           channel_name or "unknown", is_negative_control)
+            return self._auto_subtract_background(image, channel_name, pixel_size, 
+                                                  is_negative_control=is_negative_control, **kwargs)
         
         # Route to appropriate backend via adapter
         channel_label = channel_name or "unknown"
@@ -817,6 +822,131 @@ class BackgroundSubtractor:
         for k in metrics_accum:
             metrics_accum[k] /= n
         return float(np.mean(scores)), metrics_accum
+
+    def _score_volume_negative_control(
+        self, 
+        original: np.ndarray, 
+        corrected: np.ndarray, 
+        max_slices: int = 7
+    ) -> Tuple[float, Dict[str, float]]:
+        """
+        Score background subtraction for negative control channels.
+        
+        For negative controls, we want to minimize residual signal while avoiding
+        complete signal flattening (which makes data unusable for analysis).
+        
+        Higher scores indicate better background removal with preserved variance.
+        
+        Scoring formula:
+            score = w_mean * (1 - normalized_mean) + w_std * std_score + w_zero * zero_fraction
+        
+        Where:
+            - normalized_mean = corrected_mean / original_mean (lower is better)
+            - std_score: penalizes both insufficient AND excessive std reduction
+            - zero_fraction = fraction of pixels near-zero (higher is better, but not 100%)
+        """
+        # Weights balanced for negative control scoring
+        w_mean = 0.5   # Weight for mean reduction
+        w_std = 0.3    # Weight for std preservation (not too high, not too low)
+        w_zero = 0.2   # Weight for zero fraction
+        
+        z = original.shape[0]
+        idx = np.linspace(0, z - 1, num=min(z, max_slices), dtype=int)
+        scores: List[float] = []
+        
+        metrics_accum = {
+            "orig_mean": 0.0,
+            "corr_mean": 0.0,
+            "orig_std": 0.0,
+            "corr_std": 0.0,
+            "zero_frac": 0.0,
+            "mean_reduction": 0.0,
+            "std_score": 0.0,
+            "normalized_std": 0.0,
+        }
+        
+        for zi in idx:
+            orig_slice = original[zi].astype(np.float32)
+            corr_slice = corrected[zi].astype(np.float32)
+            
+            # Compute metrics
+            orig_mean = float(np.mean(orig_slice))
+            corr_mean = float(np.mean(corr_slice))
+            orig_std = float(np.std(orig_slice))
+            corr_std = float(np.std(corr_slice))
+            
+            # Zero fraction (pixels at or near zero)
+            near_zero_threshold = 1.0  # Consider values <= 1 as "zero"
+            zero_frac = float(np.mean(corr_slice <= near_zero_threshold))
+            
+            # Normalized metrics (how much we reduced relative to original)
+            normalized_mean = corr_mean / (orig_mean + 1e-6)
+            normalized_std = corr_std / (orig_std + 1e-6)
+            
+            # Mean reduction: reward lower means
+            mean_reduction = 1.0 - min(1.0, normalized_mean)
+            
+            # Std score: We want SOME reduction but not complete flattening
+            # Target: reduce std to 20-40% of original (not to near-zero)
+            # Optimal normalized_std around 0.3 (30% of original)
+            target_std_ratio = 0.3
+            std_deviation = abs(normalized_std - target_std_ratio)
+            std_score = max(0.0, 1.0 - (std_deviation / target_std_ratio))
+            
+            # Penalize complete signal removal (when corrected is essentially flat)
+            if corr_std < 0.5:  # Absolute minimum variance threshold
+                std_score = 0.0  # Heavily penalize flat images
+            
+            score = (
+                w_mean * mean_reduction
+                + w_std * std_score
+                + w_zero * min(0.9, zero_frac)  # Cap zero_frac contribution at 0.9
+            )
+            scores.append(score)
+            
+            # Accumulate metrics
+            metrics_accum["orig_mean"] += orig_mean
+            metrics_accum["corr_mean"] += corr_mean
+            metrics_accum["orig_std"] += orig_std
+            metrics_accum["corr_std"] += corr_std
+            metrics_accum["zero_frac"] += zero_frac
+            metrics_accum["mean_reduction"] += mean_reduction
+            metrics_accum["std_score"] += std_score
+            metrics_accum["normalized_std"] += normalized_std
+        
+        n = len(idx) or 1
+        for k in metrics_accum:
+            metrics_accum[k] /= n
+        
+        return float(np.mean(scores)), metrics_accum
+
+    def _compute_negative_control_metrics(self, corrected: np.ndarray) -> Dict[str, float]:
+        """
+        Compute validation metrics for negative control channels.
+        
+        These metrics help assess if the background subtraction achieved
+        the expected result for a negative control (minimal residual signal).
+        
+        Returns:
+            Dictionary with:
+            - residual_mean: Mean intensity of corrected image
+            - residual_std: Standard deviation of corrected image
+            - residual_percentile_95: 95th percentile intensity
+            - residual_percentile_99: 99th percentile intensity
+            - zero_fraction: Fraction of pixels at or near zero
+        """
+        corrected_flat = corrected.flatten().astype(np.float32)
+        
+        near_zero_threshold = 1.0
+        zero_fraction = float(np.mean(corrected_flat <= near_zero_threshold))
+        
+        return {
+            'residual_mean': float(np.mean(corrected_flat)),
+            'residual_std': float(np.std(corrected_flat)),
+            'residual_percentile_95': float(np.percentile(corrected_flat, 95)),
+            'residual_percentile_99': float(np.percentile(corrected_flat, 99)),
+            'zero_fraction': zero_fraction,
+        }
     
     def _normalize_channel_key(self, channel_name: Optional[str]) -> str:
         return channel_name.lower() if channel_name else "unknown"
@@ -972,6 +1102,7 @@ class BackgroundSubtractor:
         max_evals: int,
         channel_name: Optional[str],
         pixel_size: Optional[float],
+        is_negative_control: bool = False,
     ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
         scores: List[Dict[str, Any]] = []
         best: Optional[Dict[str, Any]] = None
@@ -980,12 +1111,24 @@ class BackgroundSubtractor:
                 break
             corrected_sample, _ = self._run_single(image_sample, method, params, channel_name, pixel_size)
             self._sync_backend()
-            score, comps = self._score_volume(image_sample, corrected_sample, weights, max_slices=max_slices)
-            # Post-check: reject flattened outputs
-            std_penalty = False
-            if comps["corr_std"] < MIN_STD_ABS or comps["corr_std"] < MIN_STD_RATIO * max(comps["orig_std"], 1e-6):
-                score = -1e6
-                std_penalty = True
+            
+            # Use appropriate scoring function based on control type
+            if is_negative_control:
+                # For negative controls: optimize for minimal residual signal
+                score, comps = self._score_volume_negative_control(
+                    image_sample, corrected_sample, max_slices=max_slices
+                )
+                # No std_penalty for negative controls (low std is actually good)
+                std_penalty = False
+            else:
+                # Standard scoring: preserve signal features
+                score, comps = self._score_volume(image_sample, corrected_sample, weights, max_slices=max_slices)
+                # Post-check: reject flattened outputs
+                std_penalty = False
+                if comps["corr_std"] < MIN_STD_ABS or comps["corr_std"] < MIN_STD_RATIO * max(comps["orig_std"], 1e-6):
+                    score = -1e6
+                    std_penalty = True
+            
             entry = {'params': params, 'score': float(score), 'components': comps, 'std_penalty': std_penalty}
             scores.append(entry)
             if best is None or score > best['score']:
@@ -1001,6 +1144,7 @@ class BackgroundSubtractor:
         max_slices: int,
         channel_name: Optional[str],
         pixel_size: Optional[float],
+        is_negative_control: bool = False,
     ) -> Dict[str, Any]:
         all_scores: List[Dict[str, Any]] = []
         ranges_used: Dict[str, Dict[str, List[Any]]] = {"coarse": seed_ranges}
@@ -1008,7 +1152,7 @@ class BackgroundSubtractor:
         coarse_candidates = self._expand_param_grid(seed_ranges)
         coarse_scores, best_coarse = self._evaluate_candidates(
             image_sample, method, coarse_candidates, weights, max_slices=max_slices, max_evals=MAX_EVALS_PER_METHOD,
-            channel_name=channel_name, pixel_size=pixel_size,
+            channel_name=channel_name, pixel_size=pixel_size, is_negative_control=is_negative_control,
         )
         all_scores.extend(coarse_scores)
         if best_coarse is None:
@@ -1036,6 +1180,7 @@ class BackgroundSubtractor:
             refined_scores, best_refined = self._evaluate_candidates(
                 image_sample, method, refined_candidates, weights, max_slices=max_slices,
                 max_evals=per_candidate_budget, channel_name=channel_name, pixel_size=pixel_size,
+                is_negative_control=is_negative_control,
             )
             all_scores.extend(refined_scores)
             if best_refined and best_refined["score"] > current_best["score"]:
@@ -1066,6 +1211,7 @@ class BackgroundSubtractor:
         image: np.ndarray,
         channel_name: Optional[str],
         pixel_size: Optional[float],
+        is_negative_control: bool = False,
         **kwargs: Any,
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
@@ -1079,6 +1225,7 @@ class BackgroundSubtractor:
         Args:
             auto_use_cache_best: If True (default), attempt cached best params first and potentially skip search.
             auto_cache_score_tolerance: Accept cached best if sample score >= cached_best_score - tolerance (default: 0.05).
+            is_negative_control: If True, use negative control scoring (minimize residual signal).
         """
         auto_use_cache_best = bool(kwargs.pop("auto_use_cache_best", True))
         auto_cache_score_tolerance = float(kwargs.pop("auto_cache_score_tolerance", 0.05))
@@ -1114,7 +1261,8 @@ class BackgroundSubtractor:
                     cached_best_method = m
                     cached_best_params = p
 
-        if cached_best_method and cached_best_params and cached_best_score is not None:
+        # For negative controls, skip cache fast path (use different scoring)
+        if cached_best_method and cached_best_params and cached_best_score is not None and not is_negative_control:
             corrected_sample, _ = self._run_single(image_sample, cached_best_method, cached_best_params, channel_name, pixel_size)
             self._sync_backend()
             score, comps = self._score_volume(image_sample, corrected_sample, weights, max_slices=min(5, len(sample_idx)))
@@ -1159,6 +1307,7 @@ class BackgroundSubtractor:
                 max_slices=min(5, len(sample_idx)),
                 channel_name=channel_name,
                 pixel_size=pixel_size,
+                is_negative_control=is_negative_control,
             )
             method_results.append(result)
 
@@ -1212,7 +1361,14 @@ class BackgroundSubtractor:
             'auto_ranges_used': best_overall.get("ranges_used", {}),
             'parameters_used': best_params,
             'method': f'gaussian+rolling_ball{method_suffix}' if best_method in {'two_stage', 'gaussian_then_rolling_ball'} else metadata.get('method', f'{best_method}{method_suffix}'),
+            'is_negative_control': is_negative_control,
         })
+        
+        # Add validation metrics for negative controls
+        if is_negative_control:
+            validation_metrics = self._compute_negative_control_metrics(corrected_full)
+            metadata['negative_control_validation'] = validation_metrics
+        
         return corrected_full, metadata
     
     def _sync_backend(self) -> None:
