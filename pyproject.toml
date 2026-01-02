@@ -27,50 +27,68 @@ classifiers = [
 ]
 
 dependencies = [
+    # === Core scientific stack ===
     "numpy>=1.20",
     "scipy>=1.7",
     "pandas>=1.4",
+
+    # === Image processing ===
     "scikit-image>=0.19",
     "scikit-learn>=1.0",
     "opencv-python>=4.5",
+    "opencv-rolling-ball>=1.0.1",
     "pillow>=9.0",
+
+    # === Image I/O formats ===
     "tifffile>=2023.7",
     "imageio>=2.11.0",
     "nd2reader>=3.3",
-    "matplotlib>=3.5",
-    "seaborn>=0.11",
-    "openpyxl>=3.0",
-    "pyyaml>=6.0",
-    "xlsxwriter>=3.0.0",
-    "opencv-rolling-ball>=1.0.1",
-    # For OIR and other proprietary format support
+    "nd2>=0.10.4",
+    "h5py>=3.15.1",
+
+    # === BioIO for proprietary formats (OIR, etc.) ===
     "bioio>=1.0.0",
     "bioio-ome-tiff>=1.0.0",
-    "bioio-bioformats>=1.0.0",  # Requires Java JRE for OIR files
-    "h5py>=3.15.1",
-    "nd2>=0.10.4",
+    "bioio-bioformats>=1.0.0",  # Requires Java JRE
+
+    # === Visualization ===
+    "matplotlib>=3.5",
+    "seaborn>=0.11",
+
+    # === Data export ===
+    "openpyxl>=3.0",
+    "xlsxwriter>=3.0.0",
+    "pyyaml>=6.0",
+
+    # === Deep learning (core) ===
     "torch>=2.9.1",
     "kornia>=0.8.2",
-    "gradio_client>=1.3.0",
+
+    # === External APIs ===
+    "gradio_client>=1.3.0",  # Cellpose API
+
+    # === Notebook interface ===
     "marimo>=0.18.4",
 ]
 
 [project.optional-dependencies]
-# Deep learning dependencies (heavy, install separately)
+# BigFISH for advanced puncta/spot detection with automatic thresholding
+puncta = [
+    "big-fish>=0.6.2",
+]
+
+# Additional deep learning models
 ml = [
-    "torch>=2.0",
     "torchvision",
     "stardist>=0.8.0",
 ]
-# GPU acceleration
+
+# GPU acceleration with CuPy
 gpu = [
     "cupy>=13.0",
 ]
-# Full installation with all optional dependencies
-full = [
-    "colokroll[ml,gpu]",
-]
-# Development dependencies
+
+# Development and testing
 dev = [
     "pytest>=9.0.1",
     "pytest-cov>=3.0",
@@ -78,6 +96,11 @@ dev = [
     "flake8>=4.0",
     "jupyterlab>=3.0",
     "ipykernel>=6.0",
+]
+
+# Full installation with all optional features
+full = [
+    "colokroll[puncta,ml,gpu]",
 ]
 
 [project.urls]
@@ -94,4 +117,3 @@ target-version = ["py310", "py311", "py312"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-
