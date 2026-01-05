@@ -472,7 +472,25 @@ def _detect_spots_bigfish(
         threshold=None,  # Auto-threshold
     )
 
-    logger.info(f"BigFISH detected {len(spots)} spots with auto-threshold={threshold:.2f}")
+    # Handle edge cases: threshold can be None (no spots) or numpy array
+    if threshold is None:
+        threshold_scalar = 0.0
+        logger.warning("BigFISH detected 0 spots (no valid threshold found)")
+    elif isinstance(threshold, np.ndarray):
+        # Handle numpy arrays of any shape
+        if threshold.size == 0:
+            threshold_scalar = 0.0
+            logger.warning("BigFISH returned empty threshold array")
+        elif threshold.size == 1:
+            threshold_scalar = float(threshold.flat[0])
+        else:
+            # Multi-element array - take first value (shouldn't happen normally)
+            threshold_scalar = float(threshold.flat[0])
+            logger.warning(f"BigFISH returned multi-element threshold array (shape={threshold.shape}), using first value")
+    else:
+        threshold_scalar = float(threshold)
+
+    logger.info(f"BigFISH detected {len(spots)} spots with auto-threshold={threshold_scalar:.2f}")
 
     # Compute elbow curve data if requested
     threshold_data = None
@@ -489,7 +507,7 @@ def _detect_spots_bigfish(
             spot_counts.append(count)
 
         threshold_data = {
-            "threshold": float(threshold),
+            "threshold": threshold_scalar,
             "thresholds": thresholds.tolist(),
             "spot_counts": spot_counts,
             "local_maxima_count": len(local_maxima),
