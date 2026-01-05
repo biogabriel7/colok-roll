@@ -110,6 +110,7 @@ res = cr.compute_colocalization(
     # Thresholding
     thresholding="otsu",          # "none", "otsu", "costes", "fixed"
     fixed_thresholds=(10, 15),    # For thresholding="fixed"
+    min_threshold_sigma=3.0,      # Signal floor: threshold >= mean + N*std
     
     # Cell filtering
     min_area="auto",              # Minimum cell area (pixels or "auto")
@@ -178,6 +179,65 @@ res = cr.compute_colocalization(
     thresholding="fixed",
     fixed_thresholds=(10.0, 15.0),  # (threshold_A, threshold_B)
 )
+```
+
+---
+
+## Signal Quality Control
+
+### The Problem with Noise-Only Channels
+
+Automatic thresholding (Otsu, Costes) assumes both channels have real signal. When a channel contains only noise (e.g., a negative control), these methods set thresholds near the noise floor, causing inflated Manders/Jaccard values.
+
+### Signal Floor (`min_threshold_sigma`)
+
+The `min_threshold_sigma` parameter ensures thresholds are meaningfully above the noise floor:
+
+$$\text{threshold}_{floor} = \mu + \sigma \times \text{min\_threshold\_sigma}$$
+
+If the computed threshold falls below this floor, it's automatically raised:
+
+```python
+res = cr.compute_colocalization(
+    ...,
+    thresholding="otsu",           # or "costes"
+    min_threshold_sigma=3.0,       # Threshold must be >= mean + 3*std
+)
+```
+
+| Value | Effect |
+|-------|--------|
+| 0 | Disabled (default) |
+| 2.0 | Conservative - allows some noise |
+| 3.0 | Recommended for most cases |
+| 5.0 | Aggressive - excludes more signal |
+
+### Detecting Floored Thresholds
+
+Results include information about whether thresholds were raised to the floor:
+
+```python
+for z_info in res['results']['total_image']['thresholds_per_z']:
+    if z_info['a_floored']:
+        print(f"Z={z_info['z']}: Channel A threshold raised from {z_info['a_original']:.2f} to {z_info['t_a']:.2f}")
+```
+
+### Example: Negative Control Analysis
+
+```python
+# Negative control where ALIX channel has no real signal
+res = cr.compute_colocalization(
+    image=corrected_stack,
+    mask=mask_path,
+    channel_a="ALIX",              # No signal (noise only)
+    channel_b="LAMP1",
+    channel_names=channel_names,
+    thresholding="otsu",
+    min_threshold_sigma=3.0,       # Ensures noise isn't counted as signal
+)
+
+# Without min_threshold_sigma: Manders ~0.15-0.25 (inflated!)
+# With min_threshold_sigma=3.0: Manders ~0.0 (correct for negative control)
 ```
 
 ---
@@ -350,6 +410,7 @@ coloc = cr.compute_colocalization(
     channel_b="LAMP1",
     channel_names=channel_names,
     thresholding="otsu",
+    min_threshold_sigma=3.0,      # Prevents noise from inflating metrics
     min_area="auto",
     min_area_fraction=0.9,
     plot_mask=True,
@@ -402,4 +463,7 @@ df_cells.to_csv("./output/per_cell_colocalization.csv", index=False)
 | B contains A | High | High | Low |
 | Partial overlap | Moderate | Moderate | Moderate |
 | No colocalization | ~0 | ~0 | ~0 |
+| Negative control (no signal in A) | ~0 | ~0 | ~0 |
+
+> **Note**: Without `min_threshold_sigma`, negative controls can show artificially inflated Manders values (0.15-0.30) because automatic thresholding sets thresholds near the noise floor. Use `min_threshold_sigma=3.0` to ensure accurate results for negative controls.
 
