@@ -420,6 +420,7 @@ def _detect_spots_bigfish(
     spot_radius_px: float,
     cell_mask: Optional[np.ndarray] = None,
     return_threshold_data: bool = False,
+    min_snr_threshold: float = 5.0,
 ) -> Union[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray, Dict[str, Any]]]:
     """
     Detect spots using BigFISH with automatic thresholding.
@@ -432,6 +433,8 @@ def _detect_spots_bigfish(
         spot_radius_px: Expected spot radius in pixels (used for LoG sigma).
         cell_mask: Optional labeled cell mask to restrict detection.
         return_threshold_data: If True, return elbow curve data for plotting.
+        min_snr_threshold: Minimum SNR threshold to apply when BigFISH auto-threshold
+            fails (returns 0 or None). This prevents detecting noise as spots.
 
     Returns:
         If return_threshold_data is False:
@@ -449,68 +452,134 @@ def _detect_spots_bigfish(
     # Import additional BigFISH modules for threshold data
     from bigfish import stack as bigfish_stack
 
-    # BigFISH expects spot radius as tuple (z, y, x) or (y, x) for 2D
-    spot_radius = (spot_radius_px, spot_radius_px)
+    # Compute LoG kernel size and minimum distance from spot radius
+    # LoG kernel size should be ~2x the spot radius (diameter)
+    log_kernel_size = max(3, int(round(spot_radius_px * 2)))
+    # Ensure odd kernel size
+    if log_kernel_size % 2 == 0:
+        log_kernel_size += 1
+    min_distance = max(1, int(round(spot_radius_px)))
+    
+    # For 2D images, use (y, x) tuple format
+    log_kernel_2d = (log_kernel_size, log_kernel_size)
+    min_distance_2d = (min_distance, min_distance)
 
-    # Step 1: Apply LoG filter
-    image_filtered = bigfish_stack.log_filter(
+    # Use the high-level detect_spots API which handles thresholding correctly
+    spots, threshold = bigfish_detection.detect_spots(
         image.astype(np.float64),
-        sigma=spot_radius,
+        threshold=None,  # Auto-threshold using elbow method
+        return_threshold=True,
+        log_kernel_size=log_kernel_2d,
+        minimum_distance=min_distance_2d,
     )
 
-    # Step 2: Detect local maxima
-    local_maxima = bigfish_detection.local_maximum_detection(
-        image_filtered,
-        min_distance=spot_radius,
-    )
-
-    # Step 3: Get threshold using automatic thresholding (elbow method)
-    # This returns spots AND threshold data
-    spots, threshold = bigfish_detection.spots_thresholding(
-        image_filtered,
-        local_maxima,
-        threshold=None,  # Auto-threshold
-    )
-
-    # Handle edge cases: threshold can be None (no spots) or numpy array
+    # Handle edge cases: threshold can be None (no spots)
     if threshold is None:
         threshold_scalar = 0.0
         logger.warning("BigFISH detected 0 spots (no valid threshold found)")
     elif isinstance(threshold, np.ndarray):
-        # Handle numpy arrays of any shape
+        # Handle numpy arrays (shouldn't happen with detect_spots, but be safe)
         if threshold.size == 0:
             threshold_scalar = 0.0
             logger.warning("BigFISH returned empty threshold array")
         elif threshold.size == 1:
             threshold_scalar = float(threshold.flat[0])
         else:
-            # Multi-element array - take first value (shouldn't happen normally)
             threshold_scalar = float(threshold.flat[0])
-            logger.warning(f"BigFISH returned multi-element threshold array (shape={threshold.shape}), using first value")
+            logger.warning(f"BigFISH returned multi-element threshold (shape={threshold.shape})")
     else:
         threshold_scalar = float(threshold)
 
-    logger.info(f"BigFISH detected {len(spots)} spots with auto-threshold={threshold_scalar:.2f}")
+    # FALLBACK: If BigFISH couldn't find a valid threshold (returns 0 or very low),
+    # apply an SNR-based minimum threshold to prevent detecting noise as spots.
+    # This is critical for negative control images where signal is minimal.
+    used_fallback = False
+    original_spot_count = len(spots)
+    
+    if threshold_scalar <= 0.01 and len(spots) > 0:
+        # Compute SNR-based fallback threshold on LoG-filtered image
+        sigma = (spot_radius_px, spot_radius_px)
+        image_filtered = bigfish_stack.log_filter(image.astype(np.float64), sigma=sigma)
+        
+        # Estimate background from LoG-filtered image
+        # Use median + MAD for robust estimation
+        median_val = float(np.median(image_filtered))
+        mad = float(np.median(np.abs(image_filtered - median_val)))
+        robust_std = 1.4826 * mad  # MAD to std conversion
+        
+        # Compute SNR-based threshold
+        fallback_threshold = median_val + min_snr_threshold * robust_std
+        
+        logger.warning(
+            f"BigFISH auto-threshold failed (threshold={threshold_scalar:.4f}, "
+            f"detected {original_spot_count} spots). "
+            f"Applying fallback SNR-based threshold: {fallback_threshold:.2f} "
+            f"(median={median_val:.2f}, std={robust_std:.2f}, SNR={min_snr_threshold})"
+        )
+        
+        # Re-detect spots with the fallback threshold
+        spots, _ = bigfish_detection.detect_spots(
+            image.astype(np.float64),
+            threshold=fallback_threshold,
+            return_threshold=True,
+            log_kernel_size=log_kernel_2d,
+            minimum_distance=min_distance_2d,
+        )
+        threshold_scalar = fallback_threshold
+        used_fallback = True
+        
+        # If fallback still detects many spots (e.g., >50% of original), 
+        # it's likely noise - return 0 spots
+        if len(spots) > 0 and original_spot_count > 0:
+            ratio = len(spots) / original_spot_count
+            if ratio > 0.3:  # More than 30% of "noise spots" still detected
+                logger.warning(
+                    f"Fallback still detected {len(spots)} spots ({ratio:.0%} of original). "
+                    f"Image likely contains only noise - returning 0 spots."
+                )
+                spots = np.empty((0, 2), dtype=np.int64)
+    
+    logger.info(
+        f"BigFISH detected {len(spots)} spots with "
+        f"{'fallback' if used_fallback else 'auto'}-threshold={threshold_scalar:.2f}"
+    )
 
     # Compute elbow curve data if requested
     threshold_data = None
     if return_threshold_data:
+        # Apply LoG filter to get the filtered image for threshold analysis
+        sigma = (spot_radius_px, spot_radius_px)
+        image_filtered = bigfish_stack.log_filter(image.astype(np.float64), sigma=sigma)
+        
         # Generate threshold range for elbow curve
         max_val = float(image_filtered.max())
         min_val = float(image_filtered[image_filtered > 0].min()) if np.any(image_filtered > 0) else 0
         thresholds = np.linspace(min_val, max_val, num=100)
 
+        # Get local maxima mask and convert to coordinates
+        local_maxima_mask = bigfish_detection.local_maximum_detection(
+            image_filtered,
+            min_distance=min_distance_2d,
+        )
+        # Convert boolean mask to coordinates
+        local_maxima_coords = np.argwhere(local_maxima_mask)
+        
         # Count spots at each threshold
         spot_counts = []
-        for t in thresholds:
-            count = int(np.sum(image_filtered[local_maxima[:, 0], local_maxima[:, 1]] >= t))
-            spot_counts.append(count)
+        if len(local_maxima_coords) > 0:
+            for t in thresholds:
+                count = int(np.sum(image_filtered[local_maxima_coords[:, 0], local_maxima_coords[:, 1]] >= t))
+                spot_counts.append(count)
+            local_maxima_count = len(local_maxima_coords)
+        else:
+            spot_counts = [0] * len(thresholds)
+            local_maxima_count = 0
 
         threshold_data = {
             "threshold": threshold_scalar,
             "thresholds": thresholds.tolist(),
             "spot_counts": spot_counts,
-            "local_maxima_count": len(local_maxima),
+            "local_maxima_count": local_maxima_count,
             "filtered_spots_count": len(spots),
         }
 
