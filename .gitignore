@@ -71,3 +71,4 @@ example_strategy_comparison.py
 test_fix_morphological_size.py
 strategy_qc/
 strategy_comparison/comparison_summary.txt
+job_monitor.log

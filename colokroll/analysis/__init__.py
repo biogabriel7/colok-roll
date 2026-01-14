@@ -11,6 +11,7 @@ from .puncta import (
     compute_puncta,
     export_puncta_json,
     plot_puncta_elbow,
+    plot_puncta_detection,
 )
 
 __all__ = [
@@ -23,4 +24,5 @@ __all__ = [
     "compute_puncta",
     "export_puncta_json",
     "plot_puncta_elbow",
+    "plot_puncta_detection",
 ]

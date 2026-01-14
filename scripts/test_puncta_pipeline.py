@@ -43,35 +43,16 @@ logger = logging.getLogger(__name__)
 # Import colokroll
 try:
     import colokroll as cr
-    from colokroll import compute_puncta, plot_puncta_elbow, compute_colocalization, estimate_min_area_threshold
+    from colokroll import compute_puncta, plot_puncta_elbow, plot_puncta_detection, compute_colocalization, estimate_min_area_threshold
     from colokroll.analysis.colocalization import _filter_labels
 except ImportError as e:
     logger.error(f"Failed to import colokroll: {e}")
     sys.exit(1)
 
-# Try to import cupy for GPU sync
-try:
-    import cupy as cp
-    HAS_CUPY = True
-except ImportError:
-    cp = None
-    HAS_CUPY = False
-
-# Try to import matplotlib for saving plots
-try:
-    import matplotlib.pyplot as plt
-    HAS_MATPLOTLIB = True
-except ImportError:
-    plt = None
-    HAS_MATPLOTLIB = False
-
-# Try to import pandas for per-cell CSV
-try:
-    import pandas as pd
-    HAS_PANDAS = True
-except ImportError:
-    pd = None
-    HAS_PANDAS = False
+# Import required dependencies
+import cupy as cp
+import matplotlib.pyplot as plt
+import pandas as pd
 
 
 # Constants
@@ -213,31 +194,29 @@ def run_pipeline(
                 is_negative_control=use_negative_control,
             )
             
-            # Sync GPU if available
-            if HAS_CUPY:
-                cp.cuda.Stream.null.synchronize()
+            # Sync GPU
+            cp.cuda.Stream.null.synchronize()
             
             dt = time.perf_counter() - t0
             bg_results[ch] = (corrected, meta)
             logger.info(f"  {ch}: {meta.get('method', 'auto')} ({dt:.2f}s)")
         
         # Save background subtraction comparison plot
-        if HAS_MATPLOTLIB:
-            try:
-                middle_slice_idx = filtered_image.shape[0] // 2
-                fig = bg_subtractor.plot_background_subtraction_comparison(
-                    original_data=filtered_image,
-                    corrected_results=bg_results,
-                    channel_names=channel_names,
-                    z_slice=middle_slice_idx,
-                    figsize=(5 * len(channel_names), 12),
-                )
-                bg_plot_path = bg_output_dir / "background_comparison.png"
-                fig.savefig(bg_plot_path, dpi=150, bbox_inches="tight")
-                plt.close(fig)
-                logger.info(f"  Saved background comparison: {bg_plot_path}")
-            except Exception as e:
-                logger.warning(f"  Could not save background plot: {e}")
+        try:
+            middle_slice_idx = filtered_image.shape[0] // 2
+            fig = bg_subtractor.plot_background_subtraction_comparison(
+                original_data=filtered_image,
+                corrected_results=bg_results,
+                channel_names=channel_names,
+                z_slice=middle_slice_idx,
+                figsize=(5 * len(channel_names), 12),
+            )
+            bg_plot_path = bg_output_dir / "background_comparison.png"
+            fig.savefig(bg_plot_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            logger.info(f"  Saved background comparison: {bg_plot_path}")
+        except Exception as e:
+            logger.warning(f"  Could not save background plot: {e}")
         
         # =====================================================================
         # Step 5: Cell segmentation
@@ -338,7 +317,7 @@ def run_pipeline(
         logger.info(f"  Detected {puncta_count} puncta")
         
         # Save elbow curve plot
-        if HAS_MATPLOTLIB and threshold_data:
+        if threshold_data:
             try:
                 ax = plot_puncta_elbow(puncta_result)
                 if ax is not None:
@@ -369,11 +348,32 @@ def run_pipeline(
         
         # Save per-cell puncta data
         puncta_per_label = puncta_result.get("results", {}).get("per_label", [])
-        if puncta_per_label and HAS_PANDAS:
+        if puncta_per_label:
             df_puncta_cells = pd.DataFrame(puncta_per_label)
             puncta_per_cell_path = puncta_output_dir / "per_cell.csv"
             df_puncta_cells.to_csv(puncta_per_cell_path, index=False)
             logger.info(f"  Saved per-cell puncta data: {puncta_per_cell_path}")
+        
+        # Save puncta detection visualization
+        try:
+            # Get MIP of ALIX channel for visualization
+            alix_data = bg_results["ALIX"][0]
+            alix_mip = np.max(alix_data, axis=0)
+            
+            # Create detection overlay visualization
+            fig = plot_puncta_detection(
+                puncta_result,
+                alix_mip,
+                cell_mask=filtered_mask,
+                figsize=(15, 5),
+                title=f"Puncta Detection - {image_name} (ALIX)",
+            )
+            detection_overlay_path = puncta_output_dir / "detection_overlay.png"
+            fig.savefig(detection_overlay_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            logger.info(f"  Saved detection overlay: {detection_overlay_path}")
+        except Exception as e:
+            logger.warning(f"  Could not save detection overlay: {e}")
         
         # =====================================================================
         # Step 7: Colocalization (ALIX vs LAMP1) - Both Otsu and Costes
@@ -470,7 +470,7 @@ def run_pipeline(
             
             # Save per-cell colocalization data (from Otsu - includes all metrics)
             per_label = coloc_otsu.get("results", {}).get("per_label", [])
-            if per_label and HAS_PANDAS:
+            if per_label:
                 df_cells = pd.DataFrame(per_label)
                 per_cell_path = coloc_output_dir / "per_cell.csv"
                 df_cells.to_csv(per_cell_path, index=False)

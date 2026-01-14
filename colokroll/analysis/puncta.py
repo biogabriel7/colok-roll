@@ -1282,10 +1282,152 @@ def plot_puncta_elbow(
     return ax
 
 
+def plot_puncta_detection(
+    result: Dict[str, Any],
+    image_2d: np.ndarray,
+    cell_mask: Optional[np.ndarray] = None,
+    figsize: Tuple[float, float] = (15, 5),
+    radius_px: int = 5,
+    title: Optional[str] = None,
+) -> Any:
+    """
+    Plot detected puncta overlaid on image using BigFISH visualization.
+    
+    Creates a multi-panel figure showing:
+    - Panel A: MIP image with detected spots (circles) using BigFISH plot_detection
+    - Panel B: Cell mask with spots colored by cell assignment
+    - Panel C: Elbow curve (if threshold_data available)
+    
+    Args:
+        result: Output from compute_puncta() with puncta coordinates.
+        image_2d: 2D image used for detection (typically MIP).
+        cell_mask: Optional 2D labeled cell mask.
+        figsize: Figure size (width, height) in inches.
+        radius_px: Radius for spot markers in pixels.
+        title: Optional title for the figure.
+        
+    Returns:
+        matplotlib figure object.
+        
+    Raises:
+        ValueError: If result doesn't contain puncta data.
+        RuntimeError: If required dependencies are missing.
+        
+    Example:
+        >>> # After puncta detection
+        >>> alix_mip = np.max(bg_results["ALIX"][0], axis=0)
+        >>> fig = plot_puncta_detection(puncta_result, alix_mip, cell_mask=mask)
+        >>> fig.savefig("detection_overlay.png", dpi=150)
+        >>> plt.close(fig)
+    """
+    if "results" not in result or "puncta" not in result["results"]:
+        raise ValueError(
+            "Result does not contain puncta data. "
+            "Ensure compute_puncta() completed successfully."
+        )
+    
+    # Import dependencies
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.colors import ListedColormap
+    except ImportError:
+        raise RuntimeError("matplotlib is required for plotting. Install with: pip install matplotlib")
+    
+    try:
+        from bigfish import plot as bigfish_plot
+    except ImportError:
+        raise RuntimeError("bigfish is required for plotting. Install with: pip install big-fish")
+    
+    # Extract spot coordinates from puncta results
+    puncta_list = result["results"]["puncta"]
+    spots = np.array([
+        [p["centroid_y"], p["centroid_x"]]
+        for p in puncta_list
+    ])
+    
+    # Determine number of panels based on available data
+    has_threshold_data = "threshold_data" in result
+    n_panels = 3 if has_threshold_data else 2
+    
+    # Create figure with subplots
+    fig, axes = plt.subplots(1, n_panels, figsize=figsize)
+    if n_panels == 1:
+        axes = [axes]
+    
+    # Panel A: Detection overlay (manual plotting for better control)
+    ax_detection = axes[0]
+    # Display image with contrast adjustment (similar to BigFISH)
+    vmin, vmax = np.percentile(image_2d, [1, 99])
+    ax_detection.imshow(image_2d, cmap="gray", vmin=vmin, vmax=vmax, interpolation="nearest")
+    
+    # Overlay detected spots as circles
+    if len(spots) > 0:
+        for spot in spots:
+            y, x = spot
+            circle = plt.Circle((x, y), radius_px, color="red", fill=False, 
+                              linewidth=1.5, alpha=0.8)
+            ax_detection.add_patch(circle)
+    ax_detection.set_title(f"Detected Spots (n={len(spots)})", fontsize=12)
+    ax_detection.axis("off")
+    
+    # Panel B: Cell mask with spots
+    ax_mask = axes[1]
+    if cell_mask is not None:
+        # Create a colorful display of cells
+        ax_mask.imshow(cell_mask, cmap="nipy_spectral", interpolation="nearest")
+        
+        # Overlay spots, colored by cell assignment
+        if len(spots) > 0:
+            spot_cell_labels = []
+            for p in puncta_list:
+                spot_cell_labels.append(p.get("cell_label", 0))
+            
+            # Plot spots with marker
+            for i, (spot, cell_label) in enumerate(zip(spots, spot_cell_labels)):
+                y, x = spot
+                color = "white" if cell_label == 0 else "red"
+                marker_size = 40 if cell_label > 0 else 20
+                ax_mask.scatter(x, y, s=marker_size, c=color, marker="o", 
+                              edgecolors="black", linewidths=0.5, alpha=0.7)
+        
+        ax_mask.set_title(f"Cell Segmentation with Spots", fontsize=12)
+    else:
+        # No mask, just show the image with spots as scatter
+        ax_mask.imshow(image_2d, cmap="gray")
+        if len(spots) > 0:
+            ax_mask.scatter(spots[:, 1], spots[:, 0], s=40, c="red", 
+                          marker="o", edgecolors="white", linewidths=0.5, alpha=0.7)
+        ax_mask.set_title(f"Spots Overlay", fontsize=12)
+    ax_mask.axis("off")
+    
+    # Panel C: Elbow curve (if available)
+    if has_threshold_data:
+        ax_elbow = axes[2]
+        try:
+            plot_puncta_elbow(result, ax=ax_elbow, title=None)
+        except Exception as e:
+            logger.warning(f"Could not plot elbow curve: {e}")
+            ax_elbow.text(0.5, 0.5, "Elbow curve\nnot available", 
+                         ha="center", va="center", transform=ax_elbow.transAxes)
+            ax_elbow.axis("off")
+    
+    # Set main title
+    if title is None:
+        channel = result.get("channel", "Unknown")
+        method = result.get("detection_params", {}).get("detection_method", "unknown")
+        title = f"Puncta Detection - {channel} ({method})"
+    
+    fig.suptitle(title, fontsize=14, fontweight="bold")
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    
+    return fig
+
+
 __all__ = [
     "compute_puncta",
     "export_puncta_json",
     "plot_puncta_elbow",
+    "plot_puncta_detection",
 ]
 
 
