@@ -17,7 +17,7 @@ import logging
 
 import numpy as np
 import tifffile
-import nd2reader
+import nd2
 
 logger = logging.getLogger(__name__)
 
@@ -283,6 +283,8 @@ class FormatConverter:
     ) -> Tuple[Path, Dict[str, Any]]:
         """Convert .nd2 file to .ome.tiff format with metadata preservation.
         
+        Uses the modern nd2 library for reliable metadata extraction and data reading.
+        
         Args:
             input_path: Path to the input .nd2 file.
             output_path: Path for the output .ome.tiff file. If None, uses same name with .ome.tiff extension.
@@ -311,13 +313,25 @@ class FormatConverter:
         logger.info(f"Converting {input_path} to {output_path}")
         
         try:
-            # Read ND2 file and extract metadata
-            with nd2reader.ND2Reader(str(input_path)) as reader:
-                metadata = self._extract_comprehensive_metadata(reader)
-                image_data = self._read_nd2_as_array(reader)
+            # Read ND2 file using modern nd2 library
+            with nd2.ND2File(str(input_path)) as f:
+                # Get image data as numpy array
+                image_data = f.asarray()
+                
+                # Get dimension sizes from the file
+                sizes = f.sizes  # e.g., {'T': 1, 'C': 4, 'Z': 31, 'Y': 1800, 'X': 1800}
+                logger.info(f"ND2 file sizes: {sizes}")
+                logger.info(f"ND2 data shape: {image_data.shape}")
+                
+                # Build source axes string from sizes
+                source_axes = ''.join(sizes.keys())
+                logger.info(f"ND2 axes order: {source_axes}")
+                
+                # Extract metadata using nd2 library
+                metadata = self._extract_nd2_metadata(f)
             
             # Ensure 4D ZYXC format
-            image_data = self._ensure_4d_zyxc(image_data, source_axes='ZYXC')
+            image_data = self._ensure_4d_zyxc(image_data, source_axes=source_axes)
             self._validate_4d_zyxc(image_data)
             
             # Update metadata dimensions to match standardized array
@@ -506,11 +520,11 @@ class FormatConverter:
             logger.error(f"Failed to convert {input_path}: {e}")
             raise ValueError(f"Conversion failed: {e}")
     
-    def _extract_comprehensive_metadata(self, reader: nd2reader.ND2Reader) -> Dict[str, Any]:
-        """Extract comprehensive metadata from ND2 reader.
+    def _extract_nd2_metadata(self, f: nd2.ND2File) -> Dict[str, Any]:
+        """Extract comprehensive metadata from ND2 file using nd2 library.
         
         Args:
-            reader: ND2Reader instance.
+            f: nd2.ND2File instance.
             
         Returns:
             Dictionary containing all relevant metadata.
@@ -519,257 +533,96 @@ class FormatConverter:
         
         # Basic metadata
         metadata['original_format'] = 'nd2'
-        metadata['axes'] = reader.axes
-        metadata['frame_shape'] = reader.frame_shape
+        metadata['conversion_method'] = 'nd2'
+        metadata['axes'] = ''.join(f.sizes.keys())
         
-        # Dimensional information
-        metadata['dimensions'] = {
-            'width': reader.metadata.get('width', reader.frame_shape[1] if len(reader.frame_shape) > 1 else None),
-            'height': reader.metadata.get('height', reader.frame_shape[0] if len(reader.frame_shape) > 0 else None),
-            'z_levels': len(reader.metadata.get('z_levels', [1])),
-            'channels': len(reader.metadata.get('channels', [])) or 1,
-            'timepoints': reader.metadata.get('total_images_per_channel', 1)
-        }
+        # Get voxel sizes (physical pixel sizes)
+        voxel_size = f.voxel_size()
+        pixel_size_x = voxel_size.x if voxel_size else None
+        pixel_size_y = voxel_size.y if voxel_size else None
+        pixel_size_z = voxel_size.z if voxel_size else None
         
         # Pixel/voxel information - CRITICAL for physical measurements
         metadata['pixel_info'] = {
-            'pixel_microns': reader.metadata.get('pixel_microns'),
-            'pixel_microns_x': reader.metadata.get('pixel_microns_x'),
-            'pixel_microns_y': reader.metadata.get('pixel_microns_y'),
-            'voxel_size_z': reader.metadata.get('z_step', None),
-            'calibration': reader.metadata.get('calibration'),
+            'pixel_microns': pixel_size_x,
+            'pixel_microns_x': pixel_size_x,
+            'pixel_microns_y': pixel_size_y,
+            'voxel_size_z': pixel_size_z,
+            'calibration': pixel_size_x,
         }
         
-        # Calculate actual pixel size
-        if metadata['pixel_info']['pixel_microns']:
-            metadata['pixel_size_um'] = metadata['pixel_info']['pixel_microns']
-        elif metadata['pixel_info']['pixel_microns_x'] and metadata['pixel_info']['pixel_microns_y']:
-            # Use average if x and y are different
-            metadata['pixel_size_um'] = (
-                metadata['pixel_info']['pixel_microns_x'] + 
-                metadata['pixel_info']['pixel_microns_y']
-            ) / 2
-        elif metadata['pixel_info']['calibration']:
-            metadata['pixel_size_um'] = metadata['pixel_info']['calibration']
+        # Calculate actual pixel size (average of x and y)
+        if pixel_size_x and pixel_size_y:
+            metadata['pixel_size_um'] = (pixel_size_x + pixel_size_y) / 2
+        elif pixel_size_x:
+            metadata['pixel_size_um'] = pixel_size_x
         else:
             metadata['pixel_size_um'] = None
             logger.warning("No pixel size information found in ND2 metadata")
         
-        # Channel information
-        if 'channels' in reader.metadata:
-            metadata['channel_names'] = reader.metadata['channels']
-        else:
-            raise ValueError(
-                "No channel information found in image file. Channel names are "
-                "required for proper analysis. Please ensure your image acquisition "
-                "software saves proper channel metadata."
-            )
+        logger.info(f"Extracted pixel size: XY={metadata['pixel_size_um']} µm, Z={pixel_size_z} µm")
         
-        # Z-stack information
-        if 'z_levels' in reader.metadata:
-            metadata['z_levels'] = reader.metadata['z_levels']
-            metadata['z_coordinates'] = reader.metadata.get('z_coordinates', [])
+        # Extract channel names from metadata
+        channel_names = []
+        try:
+            if hasattr(f, 'metadata') and f.metadata:
+                channels_meta = f.metadata.channels
+                if channels_meta:
+                    for ch in channels_meta:
+                        if hasattr(ch, 'channel') and hasattr(ch.channel, 'name'):
+                            channel_names.append(ch.channel.name)
+                        elif hasattr(ch, 'name'):
+                            channel_names.append(ch.name)
+        except Exception as e:
+            logger.debug(f"Could not extract channel names from metadata: {e}")
+        
+        # Fallback: use sizes to determine number of channels
+        num_channels = f.sizes.get('C', 1)
+        if not channel_names or len(channel_names) != num_channels:
+            logger.warning(f"Channel names not found or incomplete, using defaults")
+            channel_names = [f'Channel_{i}' for i in range(num_channels)]
+        
+        metadata['channel_names'] = channel_names
+        logger.info(f"Channel names: {channel_names}")
+        
+        # Dimensional information
+        metadata['dimensions'] = {
+            'width': f.sizes.get('X', 0),
+            'height': f.sizes.get('Y', 0),
+            'z_levels': f.sizes.get('Z', 1),
+            'channels': f.sizes.get('C', 1),
+            'timepoints': f.sizes.get('T', 1),
+        }
         
         # Acquisition information
-        metadata['acquisition'] = {
-            'date': reader.metadata.get('date'),
-            'time': reader.metadata.get('time'),
-            'experiment': reader.metadata.get('experiment', {}),
-        }
+        metadata['acquisition'] = {}
+        try:
+            if hasattr(f, 'attributes') and f.attributes:
+                attrs = f.attributes
+                if hasattr(attrs, 'date'):
+                    metadata['acquisition']['date'] = str(attrs.date) if attrs.date else None
+        except Exception as e:
+            logger.debug(f"Could not extract acquisition info: {e}")
         
         # Microscope settings
-        metadata['microscope'] = {
-            'objective': reader.metadata.get('objective'),
-            'magnification': reader.metadata.get('magnification'),
-            'numerical_aperture': reader.metadata.get('numerical_aperture'),
-            'immersion': reader.metadata.get('immersion'),
-        }
-        
-        # Additional raw metadata (for completeness)
-        metadata['raw_metadata'] = {
-            k: v for k, v in reader.metadata.items() 
-            if k not in ['channels', 'z_levels', 'pixel_microns', 'width', 'height']
-            and not isinstance(v, (list, dict)) or len(str(v)) < 1000  # Avoid huge data structures
-        }
+        metadata['microscope'] = {}
+        try:
+            if hasattr(f, 'metadata') and f.metadata:
+                if hasattr(f.metadata, 'channels') and f.metadata.channels:
+                    ch0 = f.metadata.channels[0]
+                    if hasattr(ch0, 'microscope'):
+                        mic = ch0.microscope
+                        if hasattr(mic, 'objectiveName'):
+                            metadata['microscope']['objective'] = mic.objectiveName
+                        if hasattr(mic, 'objectiveMagnification'):
+                            metadata['microscope']['magnification'] = mic.objectiveMagnification
+                        if hasattr(mic, 'objectiveNumericalAperture'):
+                            metadata['microscope']['numerical_aperture'] = mic.objectiveNumericalAperture
+        except Exception as e:
+            logger.debug(f"Could not extract microscope settings: {e}")
         
         return metadata
     
-    def _read_nd2_as_array(self, reader: nd2reader.ND2Reader) -> np.ndarray:
-        """Read ND2 file as numpy array.
-        
-        Args:
-            reader: ND2Reader instance.
-            
-        Returns:
-            Image array with dimensions (Z, Y, X, C) or appropriate subset.
-        """
-        # Get metadata for proper channel extraction
-        z_levels = len(reader.metadata.get('z_levels', [1]))
-        channels = len(reader.metadata.get('channels', [])) or 1
-        
-        logger.info(f"Expected Z levels: {z_levels}, Channels: {channels}")
-        logger.info(f"Reader axes: {reader.axes}")
-        logger.info(f"Reader sizes: {reader.sizes}")
-        logger.info(f"Available frames: {len(reader)}")
-        logger.info(f"Frame shape: {reader[0].shape}")
-        
-        # Check if reader has channel iteration capability
-        original_iter_axes = getattr(reader, 'iter_axes', [])
-        try:
-            reader.iter_axes = 'c'
-            logger.info(f"Can iterate over channels: True")
-        except Exception as e:
-            logger.info(f"Can iterate over channels: False ({e})")
-            
-        try:
-            reader.iter_axes = 'z'
-            logger.info(f"Can iterate over z: True")
-        except Exception as e:
-            logger.info(f"Can iterate over z: False ({e})")
-            
-        # Reset to original
-        try:
-            reader.iter_axes = original_iter_axes
-        except:
-            pass
-        
-        # Manually extract all channels and z-slices to ensure we get all data
-        try:
-            if 'z' in reader.axes and 'c' in reader.axes:
-                # Multi-channel, multi-z - use proper iteration
-                logger.info("Using nd2reader iteration approach for multi-channel z-stack")
-                
-                # Set up iteration over both z and c
-                reader.iter_axes = ['z', 'c']
-                reader.bundle_axes = ['y', 'x']
-                
-                logger.info(f"Set iter_axes to {reader.iter_axes}")
-                logger.info(f"Reader now has {len(reader)} frames after iteration setup")
-                
-                try:
-                    all_data = []
-                    frame_count = 0
-                    
-                    # Now iterate - should give us all Z×C combinations
-                    for frame in reader:
-                        all_data.append(frame)
-                        frame_count += 1
-                        
-                        # Debug first few frames
-                        if frame_count <= 10:
-                            logger.info(f"Iteration frame {frame_count}: shape={frame.shape}, mean={frame.mean():.2f}")
-                        
-                        # Safety check to avoid infinite loop
-                        if frame_count >= z_levels * channels * 2:  # 2x safety margin
-                            logger.warning(f"Safety break at {frame_count} frames")
-                            break
-                    
-                    logger.info(f"Iteration collected {len(all_data)} frames")
-                    
-                    if len(all_data) == z_levels * channels:
-                        # Perfect: we have all Z×C frames
-                        frame_array = np.array(all_data)  # (Z*C, Y, X)
-                        
-                        # Reshape to (Z, C, Y, X) then transpose to (Z, Y, X, C)
-                        reshaped = frame_array.reshape(z_levels, channels, frame_array.shape[1], frame_array.shape[2])
-                        result = np.transpose(reshaped, (0, 2, 3, 1))
-                        
-                        logger.info(f"Perfect iteration result shape: {result.shape}")
-                        
-                        # Validate different z-slices and channels
-                        if result.shape[0] > 1:
-                            z_means = [result[z, :, :, 0].mean() for z in range(min(5, result.shape[0]))]
-                            logger.info(f"Z-slice means (ch0): {z_means}")
-                            
-                        if result.shape[3] > 1:
-                            c_means = [result[0, :, :, c].mean() for c in range(result.shape[3])]
-                            logger.info(f"Channel means (z0): {c_means}")
-                            
-                        return result
-                        
-                    elif len(all_data) == z_levels:
-                        # Got z-slices but no channel separation - this is what's happening
-                        logger.warning("Got z-slices but no channel separation - trying channel extraction per z")
-                        
-                        # Try to extract channels for each z-slice manually
-                        multichannel_data = []
-                        for z in range(z_levels):
-                            z_channels = []
-                            for c in range(channels):
-                                try:
-                                    # Set specific coordinates
-                                    reader.default_coords = {'z': z, 'c': c, 't': 0}
-                                    frame = reader[0]  # Get first frame with these coords
-                                    z_channels.append(frame)
-                                    
-                                    if z == 0:  # Debug first z-slice
-                                        logger.info(f"Manual z={z}, c={c}: shape={frame.shape}, mean={frame.mean():.2f}")
-                                        
-                                except Exception as e:
-                                    logger.error(f"Manual extraction failed z={z}, c={c}: {e}")
-                                    # Use the first available frame as fallback
-                                    z_channels.append(all_data[0] if all_data else np.zeros((1800, 1800)))
-                            
-                            multichannel_data.append(np.stack(z_channels, axis=-1))
-                        
-                        result = np.stack(multichannel_data, axis=0)
-                        logger.info(f"Manual channel extraction result shape: {result.shape}")
-                        
-                        # Validate
-                        if result.shape[3] > 1:
-                            c_means = [result[0, :, :, c].mean() for c in range(result.shape[3])]
-                            logger.info(f"Manual channel means (z0): {c_means}")
-                            
-                        return result
-                        
-                    else:
-                        logger.error(f"Unexpected number of frames from iteration: {len(all_data)}")
-                        return np.array(all_data)
-                        
-                except Exception as e:
-                    logger.error(f"Iteration approach failed: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    
-                    # Last resort fallback
-                    logger.info("Using basic fallback")
-                    frame = reader[0]
-                    return frame[np.newaxis, ..., np.newaxis]
-                
-            elif 'c' in reader.axes:
-                # Multi-channel, single z
-                all_data = []
-                for c in range(channels):
-                    reader.default_coords['c'] = c
-                    frame = reader[0]
-                    all_data.append(frame)
-                
-                result = np.stack(all_data, axis=-1)[np.newaxis, ...]  # Add Z dimension
-                logger.info(f"Extracted shape: {result.shape}")
-                return result
-                
-            elif 'z' in reader.axes:
-                # Single channel, multi-z
-                all_data = []
-                for z in range(z_levels):
-                    reader.default_coords['z'] = z
-                    frame = reader[0]
-                    all_data.append(frame)
-                
-                result = np.stack(all_data, axis=0)[..., np.newaxis]  # Add C dimension
-                logger.info(f"Extracted shape: {result.shape}")
-                return result
-                
-            else:
-                # Single channel, single z
-                frame = reader[0]
-                result = frame[np.newaxis, ..., np.newaxis]
-                logger.info(f"Extracted shape: {result.shape}")
-                return result
-                
-        except Exception as e:
-            logger.error(f"Failed to read ND2 data: {e}")
-            raise ValueError(f"Could not read ND2 data: {e}")
     
     def _save_as_tiff(
         self, 
@@ -798,16 +651,27 @@ class FormatConverter:
             channel_names = [f'Channel_{i}' for i in range(c)]
             logger.warning(f"Channel names missing or mismatched, using defaults: {channel_names}")
         
-        # Build OME metadata
+        # For proper multi-channel OME-TIFF, convert ZYXC to ZCYX
+        # This ensures each channel is stored as a separate plane (not interleaved)
+        image_zcyx = np.transpose(image_data, (0, 3, 1, 2))  # ZYXC -> ZCYX
+        
+        # Build complete OME metadata with all required fields
         ome_metadata = {
-            'axes': STANDARD_AXES,
+            # Axis order for the data array (now ZCYX)
+            'axes': 'ZCYX',
+            # Explicit dimension sizes (required for proper OME-XML)
+            'SizeZ': z,
+            'SizeY': y,
+            'SizeX': x,
+            'SizeC': c,
+            'SizeT': 1,
+            # OME dimension order (how dimensions are stored in file)
+            'DimensionOrder': 'XYCZT',
         }
         
-        # Add channel information
-        if c > 1:
-            ome_metadata['Channel'] = [{'Name': name} for name in channel_names]
-        else:
-            ome_metadata['Channel'] = {'Name': channel_names[0]}
+        # Add channel information with proper structure for multi-channel
+        # tifffile expects a list of dicts for multiple channels
+        ome_metadata['Channel'] = [{'Name': name} for name in channel_names]
         
         # Add physical pixel sizes
         if metadata.get('pixel_size_um'):
@@ -821,14 +685,24 @@ class FormatConverter:
             ome_metadata['PhysicalSizeZ'] = metadata['pixel_info']['voxel_size_z']
             ome_metadata['PhysicalSizeZUnit'] = 'µm'
         
-        logger.info(f"Saving 4D ZYXC image: shape={image_data.shape}, axes={STANDARD_AXES}")
-        logger.info(f"Dimensions: Z={z}, Y={y}, X={x}, C={c}")
+        # Add bit depth information
+        ome_metadata['SignificantBits'] = image_data.dtype.itemsize * 8
+        
+        logger.info(f"Saving OME-TIFF: input shape={image_data.shape} (ZYXC), output shape={image_zcyx.shape} (ZCYX)")
+        logger.info(f"Dimensions: Z={z}, C={c}, Y={y}, X={x}")
+        
+        # Determine if BigTIFF is needed (for files > 2GB)
+        use_bigtiff = image_data.nbytes > 2 * 1024**3
+        if use_bigtiff:
+            logger.info("Using BigTIFF format for large file")
         
         try:
             tifffile.imwrite(
                 output_path,
-                image_data,
+                image_zcyx,
                 ome=True,
+                bigtiff=use_bigtiff,
+                photometric='minisblack',
                 metadata=ome_metadata,
                 compression='lzw'
             )
@@ -838,7 +712,9 @@ class FormatConverter:
             # Fallback: save as regular TIFF with JSON description
             tifffile.imwrite(
                 output_path,
-                image_data,
+                image_zcyx,
+                bigtiff=use_bigtiff,
+                photometric='minisblack',
                 description=json.dumps(metadata, indent=2, default=str),
                 compression='lzw'
             )
