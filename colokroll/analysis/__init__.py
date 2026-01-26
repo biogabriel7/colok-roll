@@ -32,6 +32,7 @@ __all__ = [
     "compute_puncta",
     "export_puncta_json",
     "plot_puncta_elbow",
+    "plot_puncta_detection",
     # Configuration classes
     "ColocalizationConfig",
     "PunctaConfig",

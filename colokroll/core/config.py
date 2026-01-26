@@ -57,17 +57,19 @@ class Phase2Config:
 
 @dataclass
 class Phase3Config:
-    """Phase 3: Configuration for cell and nuclei segmentation."""
+    """Phase 3: Configuration for cell and nuclei segmentation.
     
-    # Cell segmentation
-    cell_model_type: str = 'cyto2'  # Cellpose model type
+    Cell segmentation uses the Cellpose Space API via Gradio client.
+    The model used is determined by the remote Space.
+    """
+    
+    # Cell segmentation (Cellpose Space API parameters)
     cell_diameter: Optional[float] = None  # None means auto-estimate
     cell_flow_threshold: float = 0.4
     cell_cellprob_threshold: float = 0.0
     min_cell_area_pixels: int = 100  # Minimum cell area filter
     
     # Nuclei detection
-    nuclei_model_type: str = 'nuclei'  # Cellpose model for nuclei
     nuclei_diameter: Optional[float] = None
     nuclei_flow_threshold: float = 0.4
     nuclei_cellprob_threshold: float = 0.0
@@ -76,10 +78,6 @@ class Phase3Config:
     # Association
     max_nuclei_per_cell: int = 1  # For quality control
     require_nuclei_in_cell: bool = True
-    
-    # GPU acceleration
-    use_gpu: bool = False
-    gpu_device: int = 0
 
 
 @dataclass
