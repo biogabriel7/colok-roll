@@ -22,6 +22,7 @@ import tifffile as tiff
 from ..data_processing.image_loader import ImageLoader
 from ..data_processing.projection import MIPCreator
 from .segmentation_config import get_hf_token
+from .constants import RESIZE_CANDIDATES, RESIZE_FALLBACK, CLAHE_CLIP_LIMIT
 
 
 try:
@@ -29,6 +30,15 @@ try:
 except Exception as _e:  # pragma: no cover
     Client = None  # type: ignore
     handle_file = None  # type: ignore
+
+
+def _get_imread_func():
+    """Get the appropriate imread function from imageio."""
+    try:
+        from imageio.v2 import imread
+    except ImportError:
+        from imageio import imread
+    return imread
 
 
 def _normalize_to_unit_interval(array: np.ndarray) -> np.ndarray:
@@ -133,9 +143,9 @@ class CellSegmenter:
         if apply_clahe:
             try:
                 from skimage.exposure import equalize_adapthist as clahe
-                x = clahe(x, clip_limit=0.01)
-            except Exception:
-                pass
+                x = clahe(x, clip_limit=CLAHE_CLIP_LIMIT)
+            except ImportError:
+                self._logger.warning("skimage not available for CLAHE - skipping")
         return (x * 65535.0).astype(np.uint16)
 
     def _build_composite_image(
@@ -227,6 +237,66 @@ class CellSegmenter:
             return Path(getattr(output_entry, "path"))
         return Path(str(output_entry))
 
+    def _compute_resize_candidates(self, png_path: Path) -> List[int]:
+        """Compute resize candidates based on auto_resize setting and image dimensions."""
+        if not self.auto_resize:
+            return list(self.resize_candidates) or [RESIZE_FALLBACK, 400]
+        
+        imread = _get_imread_func()
+        try:
+            hh, ww = imread(str(png_path)).shape[:2]
+        except Exception:
+            hh, ww = 0, 0
+        
+        max_dim = max(hh, ww)
+        start = max(0, min(max_dim, self.max_resize_cap)) or RESIZE_FALLBACK
+        base = [start] + list(RESIZE_CANDIDATES)
+        # Ensure strictly positive integers and unique, descending
+        return sorted({int(x) for x in base if int(x) > 0}, reverse=True)
+
+    def _run_cellpose_with_retry(
+        self, client: Client, png_path: Path, candidates: List[int]
+    ) -> tuple:
+        """Run Cellpose with retry logic across resize candidates.
+        
+        First tries with update_button for each candidate, then without.
+        
+        Returns:
+            The result tuple from Cellpose API.
+            
+        Raises:
+            RuntimeError: If all attempts fail.
+        """
+        last_error: Optional[BaseException] = None
+        result = None
+
+        # First pass: with update_button
+        for rs in candidates:
+            try:
+                result = self._run_cellpose(client, png_path, rs, use_update=True)
+                return result
+            except Exception as e:  # noqa: BLE001
+                last_error = e
+                self._logger.warning(
+                    "Cellpose attempt failed at resize=%s with update_button: %s", rs, e
+                )
+                time.sleep(self.api_pause_s)
+
+        # Second pass: without update_button
+        for rs in candidates:
+            try:
+                result = self._run_cellpose(client, png_path, rs, use_update=False)
+                return result
+            except Exception as e:  # noqa: BLE001
+                last_error = e
+                self._logger.warning(
+                    "Cellpose attempt failed at resize=%s without update_button: %s", rs, e
+                )
+                time.sleep(self.api_pause_s)
+
+        detail = f"; last_error={last_error!r}" if last_error is not None else ""
+        raise RuntimeError(f"Cellpose Space failed after retries{detail}")
+
     def segment_from_image_array(
         self,
         image: np.ndarray,
@@ -257,57 +327,10 @@ class CellSegmenter:
             percentiles=(1.0, 99.9),
             apply_clahe=False,
         )
-        # Build resize candidates
-        candidates: List[int]
-        if self.auto_resize:
-            try:
-                from imageio.v2 import imread as _imread  # type: ignore
-            except Exception:  # pragma: no cover - fallback import path
-                from imageio import imread as _imread  # type: ignore
-
-            try:
-                hh, ww = _imread(str(png_path)).shape[:2]
-            except Exception:
-                hh, ww = 0, 0
-            max_dim = max(hh, ww)
-            start = max(0, min(max_dim, self.max_resize_cap)) or 1000
-            # Try largest feasible size first, then fall back
-            base = [start, 2200, 2000, 1800, 1600, 1400, 1200, 1000, 800, 600, 400]
-            # Ensure strictly positive integers and unique, descending
-            candidates = sorted({int(x) for x in base if int(x) > 0}, reverse=True)
-        else:
-            candidates = list(self.resize_candidates) or [600, 400]
+        
+        candidates = self._compute_resize_candidates(png_path)
         client = self._client()
-
-        last_error: Optional[BaseException] = None
-        result = None
-
-        # First pass: with update_button
-        for rs in candidates:
-            try:
-                result = self._run_cellpose(client, png_path, rs, use_update=True)
-                break
-            except Exception as e:  # noqa: BLE001
-                last_error = e
-                self._logger.warning("Cellpose attempt failed at resize=%s with update_button: %s", rs, e)
-                time.sleep(self.api_pause_s)
-                continue
-
-        # Second pass: try without update_button if first pass failed
-        if result is None:
-            for rs in candidates:
-                try:
-                    result = self._run_cellpose(client, png_path, rs, use_update=False)
-                    break
-                except Exception as e:  # noqa: BLE001
-                    last_error = e
-                    self._logger.warning("Cellpose attempt failed at resize=%s without update_button: %s", rs, e)
-                    time.sleep(self.api_pause_s)
-                    continue
-
-        if result is None:
-            detail = f"; last_error={last_error!r}" if last_error is not None else ""
-            raise RuntimeError(f"Cellpose Space failed after retries{detail}")
+        result = self._run_cellpose_with_retry(client, png_path, candidates)
 
         masks_tif = self._extract_output_path(result[2])
         outlines_png = self._extract_output_path(result[3])
@@ -392,52 +415,10 @@ class CellSegmenter:
             percentiles=percentiles,
             apply_clahe=apply_clahe,
         )
+        
+        candidates = self._compute_resize_candidates(png_path)
         client = self._client()
-        last_error: Optional[BaseException] = None
-        result = None
-        # Build resize candidates
-        candidates: List[int]
-        if self.auto_resize:
-            try:
-                from imageio.v2 import imread as _imread  # type: ignore
-            except Exception:
-                from imageio import imread as _imread  # type: ignore
-            try:
-                hh, ww = _imread(str(png_path)).shape[:2]
-            except Exception:
-                hh, ww = 0, 0
-            max_dim = max(hh, ww)
-            start = max(0, min(max_dim, self.max_resize_cap)) or 1000
-            base = [start, 2200, 2000, 1800, 1600, 1400, 1200, 1000, 800, 600, 400]
-            candidates = sorted({int(x) for x in base if int(x) > 0}, reverse=True)
-        else:
-            candidates = list(self.resize_candidates) or [600, 400]
-
-        # First pass: with update_button
-        for rs in candidates:
-            try:
-                result = self._run_cellpose(client, png_path, rs, use_update=True)
-                break
-            except Exception as e:  # noqa: BLE001
-                last_error = e
-                self._logger.warning("Cellpose attempt failed at resize=%s with update_button: %s", rs, e)
-                time.sleep(self.api_pause_s)
-                continue
-        # Second pass: without update_button
-        if result is None:
-            for rs in candidates:
-                try:
-                    result = self._run_cellpose(client, png_path, rs, use_update=False)
-                    break
-                except Exception as e:  # noqa: BLE001
-                    last_error = e
-                    self._logger.warning("Cellpose attempt failed at resize=%s without update_button: %s", rs, e)
-                    time.sleep(self.api_pause_s)
-                    continue
-
-        if result is None:
-            detail = f"; last_error={last_error!r}" if last_error is not None else ""
-            raise RuntimeError(f"Cellpose Space failed after retries{detail}")
+        result = self._run_cellpose_with_retry(client, png_path, candidates)
 
         masks_tif = self._extract_output_path(result[2])
         outlines_png = self._extract_output_path(result[3])
@@ -562,53 +543,10 @@ class CellSegmenter:
             percentiles=percentiles,
             apply_clahe=apply_clahe,
         )
+        
+        candidates = self._compute_resize_candidates(png_path)
         client = self._client()
-        last_error: Optional[BaseException] = None
-        result = None
-
-        # Build resize candidates
-        candidates: List[int]
-        if self.auto_resize:
-            try:
-                from imageio.v2 import imread as _imread  # type: ignore
-            except Exception:
-                from imageio import imread as _imread  # type: ignore
-            try:
-                hh, ww = _imread(str(png_path)).shape[:2]
-            except Exception:
-                hh, ww = 0, 0
-            max_dim = max(hh, ww)
-            start = max(0, min(max_dim, self.max_resize_cap)) or 1000
-            base = [start, 2200, 2000, 1800, 1600, 1400, 1200, 1000, 800, 600, 400]
-            candidates = sorted({int(x) for x in base if int(x) > 0}, reverse=True)
-        else:
-            candidates = list(self.resize_candidates) or [600, 400]
-
-        # First pass: with update_button
-        for rs in candidates:
-            try:
-                result = self._run_cellpose(client, png_path, rs, use_update=True)
-                break
-            except Exception as e:  # noqa: BLE001
-                last_error = e
-                self._logger.warning("Cellpose attempt failed at resize=%s with update_button: %s", rs, e)
-                time.sleep(self.api_pause_s)
-                continue
-        # Second pass: without update_button
-        if result is None:
-            for rs in candidates:
-                try:
-                    result = self._run_cellpose(client, png_path, rs, use_update=False)
-                    break
-                except Exception as e:  # noqa: BLE001
-                    last_error = e
-                    self._logger.warning("Cellpose attempt failed at resize=%s without update_button: %s", rs, e)
-                    time.sleep(self.api_pause_s)
-                    continue
-
-        if result is None:
-            detail = f"; last_error={last_error!r}" if last_error is not None else ""
-            raise RuntimeError(f"Cellpose Space failed after retries{detail}")
+        result = self._run_cellpose_with_retry(client, png_path, candidates)
 
         masks_tif = self._extract_output_path(result[2])
         outlines_png = self._extract_output_path(result[3])

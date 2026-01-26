@@ -12,6 +12,13 @@ import logging
 
 import numpy as np
 
+from .constants import (
+    DEFAULT_CROP_PADDING,
+    DEFAULT_SPOT_COUNT,
+    SPOT_RADIUS_SQUARED,
+    STRIPE_FREQUENCY,
+    NORMALIZATION_EPSILON,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +118,33 @@ def convert_microns_to_pixels(microns: Union[float, np.ndarray],
     return microns / pixel_size_um
 
 
+# Fluorophore color mapping: keywords -> color
+# Organized by spectral range for maintainability
+_FLUOROPHORE_COLOR_MAP = {
+    # Blue fluorophores (350-450nm excitation)
+    'blue': ('dapi', 'hoechst', 'af350', 'af405', 'pacific'),
+    # Cyan fluorophores (450-490nm excitation)
+    'cyan': ('cfp', 'af430', 'af440', 'cyan'),
+    # Green fluorophores (480-520nm excitation)
+    'green': ('gfp', 'fitc', 'af488', 'alexa488', 'af514', 'green'),
+    # Yellow fluorophores (520-570nm excitation)
+    'yellow': ('yfp', 'af532', 'af546', 'alexa532', 'alexa546', 'yellow'),
+    # Orange fluorophores (550-580nm excitation)
+    'orange': ('af555', 'af568', 'alexa555', 'alexa568', 'tritc', 'orange', 'dsred'),
+    # Red fluorophores (580-650nm excitation)
+    'red': ('af594', 'af633', 'alexa594', 'alexa633', 'texas', 'red'),
+    # Far-red/Near-infrared fluorophores (650+ nm excitation)
+    'magenta': ('af647', 'af680', 'af750', 'alexa647', 'alexa680', 'cy5', 'cy7', 'farred'),
+    # Bright field or phase contrast
+    'gray': ('bf', 'brightfield', 'phase', 'dic', 'transmission'),
+}
+
+
+def _normalize_channel_name(channel_name: str) -> str:
+    """Normalize channel name for fluorophore matching."""
+    return channel_name.lower().replace(' ', '').replace('-', '').replace('_', '')
+
+
 def get_fluorophore_color(channel_name: str) -> str:
     """Map fluorophore names to appropriate display colors based on their spectral properties.
     
@@ -120,43 +154,13 @@ def get_fluorophore_color(channel_name: str) -> str:
     Returns:
         str: Appropriate color name for visualization.
     """
-    channel_lower = channel_name.lower().replace(' ', '').replace('-', '').replace('_', '')
+    channel_lower = _normalize_channel_name(channel_name)
     
-    # Blue fluorophores (350-450nm excitation)
-    if any(x in channel_lower for x in ['dapi', 'hoechst', 'af350', 'af405', 'pacific']):
-        return 'blue'
+    for color, keywords in _FLUOROPHORE_COLOR_MAP.items():
+        if any(keyword in channel_lower for keyword in keywords):
+            return color
     
-    # Cyan fluorophores (450-490nm excitation)  
-    elif any(x in channel_lower for x in ['cfp', 'af430', 'af440', 'cyan']):
-        return 'cyan'
-    
-    # Green fluorophores (480-520nm excitation)
-    elif any(x in channel_lower for x in ['gfp', 'fitc', 'af488', 'alexa488', 'af514', 'green']):
-        return 'green'
-    
-    # Yellow fluorophores (520-570nm excitation)
-    elif any(x in channel_lower for x in ['yfp', 'af532', 'af546', 'alexa532', 'alexa546', 'yellow']):
-        return 'yellow'
-    
-    # Orange fluorophores (550-580nm excitation)
-    elif any(x in channel_lower for x in ['af555', 'af568', 'alexa555', 'alexa568', 'tritc', 'orange', 'dsred']):
-        return 'orange'
-    
-    # Red fluorophores (580-650nm excitation)
-    elif any(x in channel_lower for x in ['af594', 'af633', 'alexa594', 'alexa633', 'texas', 'red']):
-        return 'red'
-    
-    # Far-red/Near-infrared fluorophores (650+ nm excitation)
-    elif any(x in channel_lower for x in ['af647', 'af680', 'af750', 'alexa647', 'alexa680', 'cy5', 'cy7', 'farred']):
-        return 'magenta'  # Often displayed as magenta for visibility
-    
-    # Bright field or phase contrast
-    elif any(x in channel_lower for x in ['bf', 'brightfield', 'phase', 'dic', 'transmission']):
-        return 'gray'
-    
-    # Fallback for unknown fluorophores
-    else:
-        return 'white'
+    return 'white'
 
 
 def create_channel_color_mapping(channel_names: List[str]) -> Dict[str, str]:
@@ -354,7 +358,7 @@ def get_bounding_box(mask: np.ndarray) -> Tuple[int, int, int, int]:
 
 
 def crop_to_content(image: np.ndarray, mask: Optional[np.ndarray] = None, 
-                     padding: int = 10) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
+                     padding: int = DEFAULT_CROP_PADDING) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
     """Crop an image to its content with optional padding.
     
     Args:
@@ -427,30 +431,29 @@ def generate_synthetic_image(shape: Tuple[int, ...],
     elif pattern == 'spots':
         image = np.zeros(shape)
         # Add random spots
-        n_spots = 20
-        for _ in range(n_spots):
+        for _ in range(DEFAULT_SPOT_COUNT):
             if len(shape) == 2:
                 y, x = np.random.randint(0, shape[0]), np.random.randint(0, shape[1])
                 yy, xx = np.ogrid[:shape[0], :shape[1]]
-                mask = (yy - y) ** 2 + (xx - x) ** 2 <= 100
-                image[mask] = 1
+                spot_mask = (yy - y) ** 2 + (xx - x) ** 2 <= SPOT_RADIUS_SQUARED
+                image[spot_mask] = 1
             else:
                 # For higher dimensions, just use first 2D slice
                 y, x = np.random.randint(0, shape[0]), np.random.randint(0, shape[1])
                 yy, xx = np.ogrid[:shape[0], :shape[1]]
-                mask = (yy - y) ** 2 + (xx - x) ** 2 <= 100
+                spot_mask = (yy - y) ** 2 + (xx - x) ** 2 <= SPOT_RADIUS_SQUARED
                 if len(shape) == 3:
-                    image[mask, :] = 1
+                    image[spot_mask, :] = 1
                 else:
-                    image[:, mask, :] = 1
+                    image[:, spot_mask, :] = 1
     
     elif pattern == 'stripes':
         if len(shape) == 2:
             x = np.arange(shape[1])
-            image = np.sin(x * 0.1)[np.newaxis, :] * np.ones(shape)
+            image = np.sin(x * STRIPE_FREQUENCY)[np.newaxis, :] * np.ones(shape)
         else:
             x = np.arange(shape[1] if len(shape) == 3 else shape[2])
-            stripes = np.sin(x * 0.1)
+            stripes = np.sin(x * STRIPE_FREQUENCY)
             image = np.ones(shape)
             if len(shape) == 3:
                 image *= stripes[np.newaxis, :, np.newaxis]
@@ -466,7 +469,7 @@ def generate_synthetic_image(shape: Tuple[int, ...],
         image = image + noise
     
     # Normalize to 0-1
-    image = (image - image.min()) / (image.max() - image.min() + 1e-10)
+    image = (image - image.min()) / (image.max() - image.min() + NORMALIZATION_EPSILON)
     
     return image
 

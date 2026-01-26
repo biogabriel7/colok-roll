@@ -16,6 +16,15 @@ from typing import Iterable, Literal, Optional, Tuple, Union, TYPE_CHECKING
 
 import numpy as np
 
+from ..constants import (
+    DEFAULT_Z_THRESHOLD,
+    DEFAULT_SMOOTH_WINDOW,
+    DEFAULT_AUTO_KEEP_FRACTION,
+    DEFAULT_FFT_CUTOFF,
+    DEFAULT_STEP_DISTANCE,
+    DEFAULT_N_FITTING_POINTS,
+)
+
 # Import submodules
 from .focus_metrics import compute_focus_scores
 from .slice_selection import aggregate_focus_scores, detect_slices_to_keep
@@ -94,23 +103,23 @@ def select_z_slices(
     method: FocusMethod = "combined",
     aggregation: AggregationMethod = "median",
     strategy: DetectionStrategy = "relative",
-    threshold: float = 0.6,
-    smooth: int = 3,
+    threshold: float = DEFAULT_Z_THRESHOLD,
+    smooth: int = DEFAULT_SMOOTH_WINDOW,
     keep_top: Optional[int] = None,
-    auto_keep_fraction: float = 0.8,
+    auto_keep_fraction: float = DEFAULT_AUTO_KEEP_FRACTION,
     normalize: bool = True,
     normalization_mode: NormalizationMode = "per_slice",
     clip_percent: float = 0.0,
     border_width: int = 0,
     gaussian_sigma: float = 0.0,
     min_variance_threshold: float = 0.0,
-    fft_cutoff: float = 0.15,
+    fft_cutoff: float = DEFAULT_FFT_CUTOFF,
     weights: Optional[Iterable[float]] = None,
     save_plot: bool = False,
     output_path: Optional[Union[str, Path]] = None,
     compute_quality: bool = False,
-    step_distance: float = 1.0,
-    n_fitting_points: int = 5,
+    step_distance: float = DEFAULT_STEP_DISTANCE,
+    n_fitting_points: int = DEFAULT_N_FITTING_POINTS,
 ) -> ZSliceSelectionResult:
     """End-to-end helper: compute focus scores, aggregate, and select slices.
     

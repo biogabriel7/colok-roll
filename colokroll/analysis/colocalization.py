@@ -37,12 +37,23 @@ except ImportError:
 
 
 # =============================================================================
-# Module-level constants
+# Module-level constants (imported from centralized constants module)
 # =============================================================================
-_EPSILON = 1e-12  # Small value to prevent division by zero
-_DEFAULT_HISTOGRAM_BINS = 256  # Default bins for Otsu thresholding
-_COSTES_MIN_POINTS = 100  # Minimum voxels for Costes threshold estimation
-_COSTES_STEPS = 256  # Number of steps for Costes threshold search
+from .constants import (
+    EPSILON as _EPSILON,
+    DEFAULT_HISTOGRAM_BINS as _DEFAULT_HISTOGRAM_BINS,
+    COSTES_MIN_POINTS as _COSTES_MIN_POINTS,
+    COSTES_STEPS as _COSTES_STEPS,
+    MAD_TO_STD,
+    Z_SCORE_95_CI,
+    MIN_SAMPLES_FOR_CI,
+    DEFAULT_MIN_ABS_COUNT,
+    DEFAULT_MIN_FRACTION,
+    DEFAULT_JACCARD_PERCENTILE,
+    DEFAULT_MIN_UNION,
+    LOW_SUPPORT_MULTIPLIER,
+    COSTES_REFINE_STEPS,
+)
 
 
 def _to_python_float(val) -> float:
@@ -204,56 +215,24 @@ def _load_image_and_channels(
     return img, ch_a, ch_b, names
 
 
-def _reduce_3d_mask_to_2d(m: np.ndarray) -> np.ndarray:
-    """Select Z-slice with largest labeled area from a 3D mask."""
-    labeled_counts = [(z_idx, int((m[z_idx] > 0).sum())) for z_idx in range(m.shape[0])]
-    z_best = max(labeled_counts, key=lambda t: t[1])[0]
-    logger.info(
-        f"3D mask detected; reducing to 2D by selecting z={z_best} "
-        f"(largest labeled area) and broadcasting across Z."
-    )
-    return m[z_best]
-
-
-def _coerce_mask_dtype(m: np.ndarray) -> np.ndarray:
-    """Convert mask to int32, handling various input dtypes."""
-    # Integer dtype: direct conversion
-    if np.issubdtype(m.dtype, np.integer):
-        logger.info("Loaded labeled mask with integer dtype: %s", str(m.dtype))
-        return m.astype(np.int32)
-
-    # Float or other non-integer dtype: decide between binary and labeled
-    m_min = float(np.nanmin(m)) if m.size > 0 else 0.0
-    m_max = float(np.nanmax(m)) if m.size > 0 else 0.0
-
-    if 0.0 <= m_min <= m_max <= 1.0:
-        # Likely binary/probability mask; threshold at 0.5
-        logger.info("Loaded non-integer mask in [0,1]; converting to binary with threshold 0.5")
-        return (m > 0.5).astype(np.int32)
-
-    # Otherwise, assume labeled mask stored as float; round to nearest int
-    logger.info("Loaded non-integer mask with range [%s, %s]; rounding to int labels", m_min, m_max)
-    return np.rint(m).astype(np.int32)
+# Import shared mask utilities
+from ..core.mask_utils import (
+    reduce_3d_mask_to_2d as _reduce_3d_mask_to_2d,
+    coerce_mask_dtype as _coerce_mask_dtype,
+    broadcast_mask_to_z as _broadcast_mask_to_z_cpu,
+)
 
 
 def _load_mask(mask: Union[str, Path, np.ndarray]) -> np.ndarray:
     """Load and validate a 2D labeled mask."""
-    # Load from file if needed
-    if isinstance(mask, (str, Path)):
-        if ImageLoader is None:
-            raise RuntimeError("ImageLoader not available; pass a numpy array instead.")
-        m = ImageLoader().load_tif_mask(str(mask))
-    else:
-        m = np.asarray(mask)
-
-    # Reduce 3D to best 2D slice
-    if m.ndim == 3:
-        m = _reduce_3d_mask_to_2d(m)
-
-    if m.ndim != 2:
-        raise ValueError(f"Mask must be 2D after reduction; got {m.shape}")
-
-    return _coerce_mask_dtype(m)
+    from ..core.mask_utils import load_and_validate_mask
+    
+    # Create loader function if ImageLoader is available
+    loader_func = None
+    if ImageLoader is not None:
+        loader_func = lambda path: ImageLoader().load_tif_mask(path)
+    
+    return load_and_validate_mask(mask, image_loader_func=loader_func)
 
 
 def estimate_min_area_threshold(
@@ -289,12 +268,11 @@ def estimate_min_area_threshold(
 
 
 def _broadcast_mask_to_z(mask_2d: np.ndarray, z: int) -> np.ndarray:
-    # Return backend-compatible broadcast mask for indexing
-    m = mask_2d
+    """Return backend-compatible broadcast mask for indexing."""
     if HAS_CUDA:
-        m = cp.asarray(m)
+        m = cp.asarray(mask_2d)
         return cp.broadcast_to(m[cp.newaxis, ...], (z, m.shape[0], m.shape[1]))  # type: ignore[return-value]
-    return np.broadcast_to(m[np.newaxis, ...], (z, m.shape[0], m.shape[1]))
+    return _broadcast_mask_to_z_cpu(mask_2d, z)
 
 
 def _safe_corrcoef(
@@ -358,18 +336,19 @@ def _safe_corrcoef(
 
     # Approximate 95% CI via Fisher z when sample is sufficient
     ci95 = None
-    if n_finite > 10 and abs(r) < 1.0:
+    if n_finite > MIN_SAMPLES_FOR_CI and abs(r) < 1.0:
         try:
             z = 0.5 * math.log((1 + r) / (1 - r))
             se = 1.0 / math.sqrt(n_finite - 3)
-            z_lo = z - 1.96 * se
-            z_hi = z + 1.96 * se
+            z_lo = z - Z_SCORE_95_CI * se
+            z_hi = z + Z_SCORE_95_CI * se
             ci95 = (math.tanh(z_lo), math.tanh(z_hi))
-        except Exception:
+        except (ValueError, ZeroDivisionError, ArithmeticError):
+            # Fisher z-transform undefined for r=±1 or insufficient samples
             ci95 = None
 
     # Flag low support when close to the required threshold
-    low_support = n_finite < required * 1.1
+    low_support = n_finite < required * LOW_SUPPORT_MULTIPLIER
     meta = {"n": n_finite, "required": required, "low_support": bool(low_support), "ci95": ci95}
     return (r, meta) if return_meta else r
 
@@ -892,6 +871,285 @@ def _compute_thresholds(
     return t_a, t_b, meta
 
 
+def _get_empty_roi_metrics() -> Dict[str, Any]:
+    """Return default metrics for empty ROI."""
+    return {
+        "pearson_r": float("nan"),
+        "manders_m1": float("nan"),
+        "manders_m2": float("nan"),
+        "manders_m1_per_z": [],
+        "manders_m2_per_z": [],
+        "overlap_r": float("nan"),
+        "jaccard": float("nan"),
+        "n_voxels": 0.0,
+        "thresholds_per_z": [],
+    }
+
+
+def _compute_global_metrics(
+    a_norm: np.ndarray,
+    b_norm: np.ndarray,
+    pearson_winsor_clip: Optional[float],
+    pearson_min_count: int,
+    pearson_min_range: float,
+) -> Tuple[float, Dict[str, Any], float, float]:
+    """Compute Pearson, overlap, and Jaccard metrics on all Z-slices together."""
+    r_val, r_meta = _safe_corrcoef(
+        a_norm,
+        b_norm,
+        winsor_clip=pearson_winsor_clip,
+        min_count=pearson_min_count,
+        min_finite=None,
+        min_abs=DEFAULT_MIN_ABS_COUNT,
+        min_fraction=DEFAULT_MIN_FRACTION,
+        return_meta=True,
+        min_range=pearson_min_range,
+    )
+    ov = _overlap_coefficient(a_norm, b_norm)
+    jac = _jaccard_on_positive(
+        a_norm,
+        b_norm,
+        thresholding="positive",
+        thresholds=None,
+        percentile=DEFAULT_JACCARD_PERCENTILE,
+        min_union=DEFAULT_MIN_UNION,
+        min_union_fraction=DEFAULT_MIN_FRACTION,
+    )
+    return r_val, r_meta, ov, jac
+
+
+def _compute_manders_per_z(
+    img: np.ndarray,
+    ch_a: int,
+    ch_b: int,
+    roi_2d: np.ndarray,
+    thresholding: str,
+    fixed_thresholds: Optional[Tuple[float, float]],
+    threshold_domain: str,
+    a_mm: Optional[Tuple[float, float]],
+    b_mm: Optional[Tuple[float, float]],
+) -> Tuple[List[float], List[float], List[Dict[str, Any]], float, float, float, float]:
+    """Compute Manders coefficients per Z-slice with independent thresholds."""
+    num_z = img.shape[0]
+    m1_per_z: List[float] = []
+    m2_per_z: List[float] = []
+    thresholds_per_z: List[Dict[str, Any]] = []
+    sum_a_over_b = 0.0
+    sum_b_over_a = 0.0
+    total_a = 0.0
+    total_b = 0.0
+    
+    # First pass: compute total intensities for voxel weighting
+    for z_idx in range(num_z):
+        a_raw_z, b_raw_z = _extract_channel_vectors_single_z(img, ch_a, ch_b, roi_2d, z_idx)
+        if a_raw_z.size > 0:
+            total_a += float(np.sum(a_raw_z))
+            total_b += float(np.sum(b_raw_z))
+    
+    # Second pass: compute metrics
+    for z_idx in range(num_z):
+        channel_a_raw_z, channel_b_raw_z = _extract_channel_vectors_single_z(img, ch_a, ch_b, roi_2d, z_idx)
+        
+        if channel_a_raw_z.size == 0:
+            continue
+        
+        # Normalize if needed
+        if a_mm is not None and b_mm is not None:
+            channel_a_norm_z, channel_b_norm_z = _normalize(a_mm, b_mm, channel_a_raw_z, channel_b_raw_z)
+        else:
+            channel_a_norm_z, channel_b_norm_z = channel_a_raw_z, channel_b_raw_z
+        
+        # Select domain for threshold discovery (raw or normalized)
+        if threshold_domain == "raw":
+            channel_a_for_threshold, channel_b_for_threshold = channel_a_raw_z, channel_b_raw_z
+        else:
+            channel_a_for_threshold, channel_b_for_threshold = channel_a_norm_z, channel_b_norm_z
+        
+        # Determine thresholds for this Z-slice
+        threshold_a_at_z, threshold_b_at_z = _compute_thresholds(
+            channel_a_for_threshold, channel_b_for_threshold, thresholding, fixed_thresholds
+        )
+        
+        # Compute Manders for this Z-slice
+        m1_z, m2_z = _manders_m1_m2(
+            channel_a_for_threshold, channel_b_for_threshold, 
+            t_a=threshold_a_at_z, t_b=threshold_b_at_z
+        )
+        m1_per_z.append(m1_z)
+        m2_per_z.append(m2_z)
+        
+        # Accumulate voxel-weighted numerators for global M1/M2
+        threshold_a = threshold_a_at_z if threshold_a_at_z is not None else 0
+        threshold_b = threshold_b_at_z if threshold_b_at_z is not None else 0
+        sum_a_over_b += float(np.sum(channel_a_for_threshold[channel_b_for_threshold > threshold_b]))
+        sum_b_over_a += float(np.sum(channel_b_for_threshold[channel_a_for_threshold > threshold_a]))
+        
+        thresholds_per_z.append({
+            "z": z_idx,
+            "t_a": None if threshold_a_at_z is None else float(threshold_a_at_z),
+            "t_b": None if threshold_b_at_z is None else float(threshold_b_at_z),
+        })
+    
+    return m1_per_z, m2_per_z, thresholds_per_z, sum_a_over_b, sum_b_over_a, total_a, total_b
+
+
+def _aggregate_manders(
+    m1_per_z: List[float],
+    m2_per_z: List[float],
+    sum_a_over_b: float,
+    sum_b_over_a: float,
+    total_a: float,
+    total_b: float,
+    manders_weighting: str,
+) -> Tuple[float, float]:
+    """Aggregate per-Z Manders coefficients based on weighting strategy."""
+    if manders_weighting == "slice":
+        m1 = float(np.nanmean(m1_per_z)) if m1_per_z else float("nan")
+        m2 = float(np.nanmean(m2_per_z)) if m2_per_z else float("nan")
+    elif manders_weighting == "voxel":
+        m1 = sum_a_over_b / total_a if total_a > 0 else float("nan")
+        m2 = sum_b_over_a / total_b if total_b > 0 else float("nan")
+    else:
+        raise ValueError("manders_weighting must be one of {'voxel','slice'}")
+    return m1, m2
+
+
+def _compute_roi_metrics(
+    img: np.ndarray,
+    ch_a: int,
+    ch_b: int,
+    roi_2d: np.ndarray,
+    thresholding: str,
+    fixed_thresholds: Optional[Tuple[float, float]],
+    threshold_domain: str,
+    manders_weighting: str,
+    pearson_winsor_clip: Optional[float],
+    pearson_min_count: int,
+    pearson_min_range: float,
+) -> Dict[str, Any]:
+    """Compute all colocalization metrics for a single ROI."""
+    # Extract raw channel vectors
+    a_raw, b_raw = _extract_channel_vectors(img, ch_a, ch_b, roi_2d)
+    
+    if a_raw.size == 0:
+        return _get_empty_roi_metrics()
+    
+    # Use raw values (normalization deprecated)
+    a_norm, b_norm = a_raw, b_raw
+    a_mm = b_mm = None
+    
+    # Compute global metrics (Pearson, overlap, Jaccard)
+    r_val, r_meta, ov, jac = _compute_global_metrics(
+        a_norm, b_norm, pearson_winsor_clip, pearson_min_count, pearson_min_range
+    )
+    
+    # Compute Manders per Z-slice
+    (m1_per_z, m2_per_z, thresholds_per_z, 
+     sum_a_over_b, sum_b_over_a, total_a, total_b) = _compute_manders_per_z(
+        img, ch_a, ch_b, roi_2d, thresholding, fixed_thresholds, 
+        threshold_domain, a_mm, b_mm
+    )
+    
+    # Aggregate Manders
+    m1, m2 = _aggregate_manders(
+        m1_per_z, m2_per_z, sum_a_over_b, sum_b_over_a, total_a, total_b, manders_weighting
+    )
+    
+    return {
+        "pearson_r": float(r_val),
+        "pearson_meta": r_meta,
+        "manders_m1": float(m1),
+        "manders_m2": float(m2),
+        "manders_m1_per_z": [float(x) for x in m1_per_z],
+        "manders_m2_per_z": [float(x) for x in m2_per_z],
+        "manders_weighting": manders_weighting,
+        "overlap_r": float(ov),
+        "jaccard": float(jac),
+        "n_voxels": float(a_raw.size),
+        "thresholds_per_z": thresholds_per_z,
+    }
+
+
+def _compute_summary_statistics(per_label: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Compute summary statistics (mean over labels)."""
+    def _mean_over_labels(key: str) -> float:
+        vals = [x[key] for x in per_label if np.isfinite(x[key])]
+        return float(np.mean(vals)) if len(vals) else float("nan")
+    
+    return {
+        "labels_count": int(len(per_label)),
+        "mean_over_labels": {
+            "pearson_r": _mean_over_labels("pearson_r"),
+            "manders_m1": _mean_over_labels("manders_m1"),
+            "manders_m2": _mean_over_labels("manders_m2"),
+            "overlap_r": _mean_over_labels("overlap_r"),
+            "jaccard": _mean_over_labels("jaccard"),
+        },
+    }
+
+
+def _prepare_mask_and_filter(
+    mask_2d: np.ndarray,
+    drop_label_1: bool,
+    min_area: int,
+    max_border_fraction: Optional[float],
+    border_margin_px: int,
+) -> Tuple[np.ndarray, Dict[str, Any], bool]:
+    """Prepare mask by filtering labels based on area and border criteria."""
+    has_label_1 = np.any(mask_2d == 1)
+    
+    if has_label_1 and drop_label_1:
+        mask_2d[mask_2d == 1] = 0
+        logger.warning(
+            "Removed label 1 from mask (assumed background, e.g., Cellpose). "
+            "Set drop_label_1=False to keep it."
+        )
+    
+    filter_info: Dict[str, Any] = {
+        "min_area": int(min_area),
+        "max_border_fraction": None if max_border_fraction is None else float(max_border_fraction),
+        "border_margin_px": int(border_margin_px),
+        "kept_labels": [int(l) for l in np.unique(mask_2d) if l > 1],
+        "removed_labels": [1] if (has_label_1 and drop_label_1) else [],
+    }
+    
+    if min_area > 0 or max_border_fraction is not None:
+        mask_2d, filter_info = _filter_labels(
+            mask_2d,
+            min_area=min_area,
+            max_border_fraction=max_border_fraction,
+            border_margin_px=border_margin_px,
+        )
+        if has_label_1 and 1 not in filter_info["removed_labels"]:
+            filter_info["removed_labels"].append(1)
+    else:
+        logger.info("No label filtering applied.")
+    
+    return mask_2d, filter_info, has_label_1
+
+
+def _apply_optional_preprocessing(
+    img: np.ndarray,
+    union_mask: np.ndarray,
+    bleedthrough_matrix: Optional[List[List[float]]],
+    background_subtract: Optional[Dict[str, Any]],
+) -> np.ndarray:
+    """Apply optional bleedthrough unmixing and background subtraction."""
+    if bleedthrough_matrix is not None:
+        if apply_bleedthrough_unmix is None:
+            raise RuntimeError("Bleed-through unmix utility unavailable")
+        mat = np.asarray(bleedthrough_matrix, dtype=np.float32)
+        img = apply_bleedthrough_unmix(img, mat)
+    
+    if background_subtract is not None:
+        if subtract_background_percentile_roi is None:
+            raise RuntimeError("Background subtraction utility unavailable")
+        perc = float(background_subtract.get("percentile", 1.0))
+        img = subtract_background_percentile_roi(img, union_mask, percentile=perc)
+    
+    return img
+
+
 def _plot_mask_with_indices(
     mask_original: np.ndarray,
     kept: List[int],
@@ -983,10 +1241,11 @@ def compute_colocalization(
     - output_json: optional path to save results as JSON.
     Returns a JSON-serializable dict with per-label and total_image metrics.
     """
+    # Phase 1: Load image and mask
     img, ch_a, ch_b, names = _load_image_and_channels(image, channel_a, channel_b, channel_names)
     mask_2d = _load_mask(mask)
     
-    # Auto-estimate min_area from mask if requested
+    # Handle deprecated parameters
     if normalization_scope.lower() != "none":
         logger.warning(
             "normalization_scope is deprecated; raw intensities are always used. "
@@ -1001,73 +1260,34 @@ def compute_colocalization(
         )
         threshold_domain = "raw"
 
+    # Auto-estimate min_area if requested
     if min_area == "auto":
         min_area = estimate_min_area_threshold(mask_2d, fraction_of_median=min_area_fraction)
         logger.info(f"Auto-estimated min_area threshold: {min_area} (fraction={min_area_fraction})")
     else:
         min_area = int(min_area)
     
+    # Log configuration
     logger.info(
-        "Starting compute_colocalization(ch_a=%s, ch_b=%s, normalization_scope=%s, min_area=%d, max_border_fraction=%s, border_margin_px=%d, plot_mask=%s)",
-        str(channel_a),
-        str(channel_b),
-        normalization_scope,
-        int(min_area),
-        str(max_border_fraction),
-        int(border_margin_px),
-        str(plot_mask),
+        "Starting compute_colocalization(ch_a=%s, ch_b=%s, min_area=%d, manders_weighting=%s)",
+        str(channel_a), str(channel_b), int(min_area), manders_weighting,
     )
     logger.info(
-        "Image loaded: shape=%s, channels=%s | Mask loaded: shape=%s, unique_labels=%d",
-        tuple(int(x) for x in img.shape),
-        names,
-        tuple(int(x) for x in mask_2d.shape),
-        int(len(np.unique(mask_2d)) - (1 if np.any(mask_2d == 0) else 0)),
-    )
-    logger.info(
-        "Manders coefficients (M1/M2) weighting: %s (thresholding=%s, z-slices=%d)",
-        manders_weighting,
-        thresholding,
-        img.shape[0],
+        "Image loaded: shape=%s, channels=%s | Mask loaded: shape=%s",
+        tuple(int(x) for x in img.shape), names, tuple(int(x) for x in mask_2d.shape),
     )
 
+    # Validate dimensions
     if mask_2d.shape != img.shape[1:3]:
         raise ValueError(f"Mask (H,W) {mask_2d.shape} must match image spatial size {img.shape[1:3]}")
 
-    # Keep a copy of original mask for visualization
+    # Phase 2: Filter mask labels
     mask_original = mask_2d.copy()
-    
-    # Automatically remove label 1 (background in Cellpose)
-    has_label_1 = np.any(mask_2d == 1)
-    if has_label_1 and drop_label_1:
-        mask_2d[mask_2d == 1] = 0
-        logger.warning(
-            "Removed label 1 from mask (assumed background, e.g., Cellpose). "
-            "Set drop_label_1=False to keep it."
-        )
+    mask_2d, filter_info, _ = _prepare_mask_and_filter(
+        mask_2d, drop_label_1, min_area, max_border_fraction, border_margin_px
+    )
 
-    # Optional filtering BEFORE normalization/metrics
-    filter_info: Dict[str, Any] = {
-        "min_area": int(min_area),
-        "max_border_fraction": None if max_border_fraction is None else float(max_border_fraction),
-        "border_margin_px": int(border_margin_px),
-        "kept_labels": [int(l) for l in np.unique(mask_2d) if l > 1],  # Exclude 0 (background) and 1 (already removed)
-        "removed_labels": [1] if (has_label_1 and drop_label_1) else [],
-    }
-    if min_area > 0 or max_border_fraction is not None:
-        mask_2d, filter_info = _filter_labels(
-            mask_2d,
-            min_area=min_area,
-            max_border_fraction=max_border_fraction,
-            border_margin_px=border_margin_px,
-        )
-        # Preserve label 1 in removed list (it was already removed before filtering)
-        if has_label_1 and 1 not in filter_info["removed_labels"]:
-            filter_info["removed_labels"].append(1)
-    else:
-        logger.info("No label filtering applied.")
-
-    # Optional visualization of labels (kept=black, removed=red)
+    # Optional mask visualization
     if plot_mask:
         fig = _plot_mask_with_indices(
             mask_original,
@@ -1083,192 +1303,47 @@ def compute_colocalization(
             filter_info["mask_plot_path"] = str(plot_path)
         elif fig is not None:
             try:
-                import matplotlib.pyplot as plt  # type: ignore
+                import matplotlib.pyplot as plt
                 plt.close(fig)
-            except Exception:
+            except ImportError:
+                # matplotlib not available - figure will be garbage collected
                 pass
 
-    # Build union mask (labels>0) AFTER filtering
+    # Phase 3: Apply optional preprocessing
     union_mask = (mask_2d > 0)
+    img = _apply_optional_preprocessing(img, union_mask, bleedthrough_matrix, background_subtract)
 
-    # Optional preprocessing before metrics
-    if bleedthrough_matrix is not None:
-        if apply_bleedthrough_unmix is None:
-            raise RuntimeError("Bleed-through unmix utility unavailable")
-        mat = np.asarray(bleedthrough_matrix, dtype=np.float32)
-        img = apply_bleedthrough_unmix(img, mat)  # type: ignore[arg-type]
-
-    if background_subtract is not None:
-        if subtract_background_percentile_roi is None:
-            raise RuntimeError("Background subtraction utility unavailable")
-        perc = float(background_subtract.get("percentile", 1.0))
-        img = subtract_background_percentile_roi(img, union_mask, percentile=perc)  # type: ignore[arg-type]
-
-    # Normalization is deprecated; metrics use raw values
-    a_mm = b_mm = None  # type: ignore
-
-    # Helper to compute metrics for a boolean ROI (2D)
-    def metrics_for_roi(roi_2d: np.ndarray) -> Dict[str, float]:
-        a_raw, b_raw = _extract_channel_vectors(img, ch_a, ch_b, roi_2d)
-        if a_raw.size == 0:
-            return {
-                "pearson_r": float("nan"),
-                "manders_m1": float("nan"),
-                "manders_m2": float("nan"),
-                "manders_m1_per_z": [],
-                "manders_m2_per_z": [],
-                "overlap_r": float("nan"),
-                "jaccard": float("nan"),
-                "n_voxels": 0.0,
-                "thresholds_per_z": [],
-            }
-
-        if a_mm is not None:
-            a_norm, b_norm = _normalize(a_mm, b_mm, a_raw, b_raw)  # type: ignore[arg-type]
-        else:
-            a_norm, b_norm = a_raw, b_raw
-
-        # Pearson, overlap, and Jaccard computed on all Z-slices together
-        r_val, r_meta = _safe_corrcoef(
-            a_norm,
-            b_norm,
-            winsor_clip=pearson_winsor_clip,
-            min_count=pearson_min_count,
-            min_finite=None,
-            min_abs=20,
-            min_fraction=0.05,
-            return_meta=True,
-            min_range=pearson_min_range,
-        )
-        ov = _overlap_coefficient(a_norm, b_norm)
-        jac = _jaccard_on_positive(
-            a_norm,
-            b_norm,
-            thresholding="positive",
-            thresholds=None,
-            percentile=99.0,
-            min_union=20,
-            min_union_fraction=0.05,
-        )
-
-        # Manders computed per Z-slice with independent thresholds
-        num_z = img.shape[0]
-        m1_per_z = []
-        m2_per_z = []
-        thresholds_per_z = []
-        voxel_weights = []
-        sum_a_over_b = 0.0
-        sum_b_over_a = 0.0
-        total_a = float(np.sum(a_tsrc := a_raw))  # type: ignore[assignment]
-        total_b = float(np.sum(b_tsrc := b_raw))  # type: ignore[assignment]
-        
-        for z_idx in range(num_z):
-            a_raw_z, b_raw_z = _extract_channel_vectors_single_z(img, ch_a, ch_b, roi_2d, z_idx)
-            
-            if a_raw_z.size == 0:
-                continue
-            
-            # Normalize if needed
-            if a_mm is not None:
-                a_norm_z, b_norm_z = _normalize(a_mm, b_mm, a_raw_z, b_raw_z)  # type: ignore[arg-type]
-            else:
-                a_norm_z, b_norm_z = a_raw_z, b_raw_z
-            
-            # Select domain for threshold discovery
-            if threshold_domain == "raw":
-                a_tsrc_z, b_tsrc_z = a_raw_z, b_raw_z
-            elif threshold_domain == "normalized":
-                a_tsrc_z, b_tsrc_z = a_norm_z, b_norm_z
-            else:
-                raise ValueError("threshold_domain must be one of {'raw','normalized'}")
-            
-            # Determine thresholds for this Z-slice using extracted helper
-            t_a_z, t_b_z, thresh_meta = _compute_thresholds(
-                a_tsrc_z, b_tsrc_z, thresholding, fixed_thresholds, min_threshold_sigma
-            )
-            
-            # Compute Manders for this Z-slice
-            m1_z, m2_z = _manders_m1_m2(a_tsrc_z, b_tsrc_z, t_a=t_a_z, t_b=t_b_z)
-            m1_per_z.append(m1_z)
-            m2_per_z.append(m2_z)
-            voxel_weights.append(int(a_tsrc_z.size))
-
-            # Accumulate voxel-weighted numerators for global M1/M2
-            sum_a_over_b += float(np.sum(a_tsrc_z[b_tsrc_z > (t_b_z if t_b_z is not None else 0)]))
-            sum_b_over_a += float(np.sum(b_tsrc_z[a_tsrc_z > (t_a_z if t_a_z is not None else 0)]))
-            thresh_info = {
-                "z": z_idx,
-                "t_a": None if t_a_z is None else float(t_a_z),
-                "t_b": None if t_b_z is None else float(t_b_z),
-                "a_floored": thresh_meta.get("a_floored", False),
-                "b_floored": thresh_meta.get("b_floored", False),
-            }
-            if thresh_meta.get("a_original") is not None:
-                thresh_info["a_original"] = float(thresh_meta["a_original"])
-            if thresh_meta.get("b_original") is not None:
-                thresh_info["b_original"] = float(thresh_meta["b_original"])
-            thresholds_per_z.append(thresh_info)
-        
-        # Aggregate Manders
-        if manders_weighting == "slice":
-            m1 = float(np.nanmean(m1_per_z)) if m1_per_z else float("nan")
-            m2 = float(np.nanmean(m2_per_z)) if m2_per_z else float("nan")
-        elif manders_weighting == "voxel":
-            m1 = sum_a_over_b / total_a if total_a > 0 else float("nan")
-            m2 = sum_b_over_a / total_b if total_b > 0 else float("nan")
-        else:
-            raise ValueError("manders_weighting must be one of {'voxel','slice'}")
-
-        return {
-            "pearson_r": float(r_val),
-            "pearson_meta": r_meta,
-            "manders_m1": float(m1),
-            "manders_m2": float(m2),
-            "manders_m1_per_z": [float(x) for x in m1_per_z],
-            "manders_m2_per_z": [float(x) for x in m2_per_z],
-            "manders_weighting": manders_weighting,
-            "overlap_r": float(ov),
-            "jaccard": float(jac),
-            # number of voxels used in this ROI (use channel vector length)
-            "n_voxels": float(a_raw.size),
-            "thresholds_per_z": thresholds_per_z,
-        }
-
-    # Per-label metrics (after filtering)
+    # Phase 4: Compute per-label metrics
     labels = np.unique(mask_2d)
     labels = labels[labels != 0]
     per_label: List[Dict[str, Any]] = []
+    
     for lab in labels.tolist():
         roi = (mask_2d == lab)
-        m = metrics_for_roi(roi)
+        m = _compute_roi_metrics(
+            img, ch_a, ch_b, roi, thresholding, fixed_thresholds,
+            threshold_domain, manders_weighting, pearson_winsor_clip,
+            pearson_min_count, pearson_min_range,
+        )
         m["type"] = f"cell{int(lab)}"
         m["label"] = int(lab)
         per_label.append(m)
 
-    # Total image metrics (union of labels)
-    total_metrics = metrics_for_roi(union_mask)
+    # Phase 5: Compute total image metrics
+    total_metrics = _compute_roi_metrics(
+        img, ch_a, ch_b, union_mask, thresholding, fixed_thresholds,
+        threshold_domain, manders_weighting, pearson_winsor_clip,
+        pearson_min_count, pearson_min_range,
+    )
     total_metrics["type"] = "total_image"
+    
     logger.info(
         "Computed metrics for %d labels; total_image n_voxels=%s",
-        int(len(labels)),
-        str(total_metrics.get("n_voxels")),
+        int(len(labels)), str(total_metrics.get("n_voxels")),
     )
 
-    # Aggregate (mean over labels) for convenience
-    def _mean_over_labels(key: str) -> float:
-        vals = [x[key] for x in per_label if np.isfinite(x[key])]
-        return float(np.mean(vals)) if len(vals) else float("nan")
-
-    summary = {
-        "labels_count": int(len(labels)),
-        "mean_over_labels": {
-            "pearson_r": _mean_over_labels("pearson_r"),
-            "manders_m1": _mean_over_labels("manders_m1"),
-            "manders_m2": _mean_over_labels("manders_m2"),
-            "overlap_r": _mean_over_labels("overlap_r"),
-            "jaccard": _mean_over_labels("jaccard"),
-        },
-    }
+    # Phase 6: Build output
+    summary = _compute_summary_statistics(per_label)
 
     out: Dict[str, Any] = {
         "image_shape": tuple(int(x) for x in img.shape),
@@ -1286,7 +1361,6 @@ def compute_colocalization(
         },
     }
     
-    # Save to JSON if output path provided
     if output_json is not None:
         export_colocalization_json(out, output_json)
     

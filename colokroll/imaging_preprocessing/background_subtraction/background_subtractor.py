@@ -35,7 +35,9 @@ from .backends import BackendAdapter, CpuAdapter, CudaAdapter, MpsAdapter
 from .cpu_backend import subtract_background_cpu
 from .cuda_backend import subtract_background_cuda
 from .mps_backend import subtract_background_mps
-from .auto_bg_config import AUTO_BG_CONFIG
+from .scorer import BackgroundScorer
+from .auto_selector import AutoModeSelector, AUTO_METHODS, DEFAULT_COARSE_SEEDS, REFINE_POINTS, SECOND_REFINE_POINTS
+from .visualization import VisualizationHelper
 
 # Optional backends are lazy-loaded to keep imports light
 CUDA_AVAILABLE = False
@@ -52,36 +54,36 @@ CPU_AVAILABLE = True
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
 
+from ..constants import (
+    DEFAULT_AUTO_WEIGHTS,
+    SSIM_WEIGHT,
+    IMPROVEMENT_EPS,
+    MAX_EVALS_PER_METHOD,
+    MIN_INT_STEP,
+    MIN_FLOAT_STEP,
+    TOPN_COARSE,
+    TESTED_VALUES_MAX,
+    MIN_STD_RATIO,
+    MIN_STD_ABS,
+    FG_MIN_PIXELS,
+    FG_DILATE_RADIUS,
+    MAX_GPU_MEMORY_FRACTION,
+    MAX_CHUNK_MEMORY_MB,
+    CHUNK_THRESHOLD_PIXELS,
+    SCORE_WEIGHT_MEAN,
+    SCORE_WEIGHT_STD,
+    SCORE_WEIGHT_ZERO_FRACTION,
+    NEAR_ZERO_THRESHOLD,
+    TARGET_STD_RATIO,
+    CORRELATION_STD_THRESHOLD,
+    REFINEMENT_SHRINK_FACTOR,
+    MAX_SLICES_FOR_SCORING,
+    AUTO_CACHE_SCORE_TOLERANCE,
+)
+
 logger = logging.getLogger(__name__)
 
 AUTO_CACHE_FILENAME = "auto_bg_cache.json"
-# Heavier emphasis on background removal and contrast, lighter zero-penalty.
-# We add SSIM as an additional term (separate constant below).
-DEFAULT_AUTO_WEIGHTS: Tuple[float, float, float, float] = (0.7, 0.4, 0.2, 0.1)
-SSIM_WEIGHT: float = 0.3
-AUTO_METHODS: Tuple[str, ...] = ("rolling_ball", "gaussian", "two_stage", "morphological")
-DEFAULT_COARSE_SEEDS: Dict[str, Dict[str, List[Any]]] = {
-    "rolling_ball": {"radius": [16, 32, 64, 96, 128], "light_background": [False, True]},
-    "gaussian": {"sigma": [5.0, 20.0, 50.0, 100.0, 200.0]},
-    "two_stage": {
-        "sigma_stage1": [5.0, 15.0, 30.0, 60.0],
-        "radius_stage2": [16, 32, 64, 96],
-        "light_background": [False, True],
-    },
-    "morphological": {"size": [5, 15, 30, 60, 90], "shape": ["disk", "square"]},
-}
-REFINE_POINTS: Dict[str, int] = {"rolling_ball": 7, "gaussian": 8, "two_stage": 5, "morphological": 7}
-SECOND_REFINE_POINTS: Dict[str, int] = {"rolling_ball": 5, "gaussian": 6, "two_stage": 4, "morphological": 5}
-IMPROVEMENT_EPS = 0.02
-MAX_EVALS_PER_METHOD = 60
-MIN_INT_STEP = 1
-MIN_FLOAT_STEP = 0.5
-TOPN_COARSE = 3
-TESTED_VALUES_MAX = 20
-MIN_STD_RATIO = 0.08
-MIN_STD_ABS = 1e-3
-FG_MIN_PIXELS = 50
-FG_DILATE_RADIUS = 2
 def _ensure_cuda() -> bool:
     """Lazy-load CUDA dependencies."""
     global cp, CUDA_AVAILABLE
@@ -156,6 +158,15 @@ class BackgroundSubtractor:
         self.auto_weights = DEFAULT_AUTO_WEIGHTS
         self.auto_cache_path = Path(__file__).with_name(AUTO_CACHE_FILENAME)
         
+        # Initialize helper classes
+        self._scorer = BackgroundScorer(weights=self.auto_weights, ssim_weight=SSIM_WEIGHT)
+        self._auto_selector = AutoModeSelector(
+            scorer=self._scorer, 
+            cache_path=self.auto_cache_path,
+            weights=self.auto_weights
+        )
+        self._visualizer = VisualizationHelper()
+        
         # Determine backend: CUDA > MPS > CPU
         self.backend = self._select_backend(use_cuda, use_mps)
         self.use_cuda = (self.backend == 'cuda')
@@ -173,6 +184,21 @@ class BackgroundSubtractor:
             self.logger.info("Initializing CPU background subtractor (SciPy)")
             self._initialize_cpu()
             self.adapter = CpuAdapter(self)
+    
+    @property
+    def scorer(self) -> BackgroundScorer:
+        """Access the background quality scorer for external use."""
+        return self._scorer
+    
+    @property
+    def auto_selector(self) -> AutoModeSelector:
+        """Access the auto-mode parameter selector for external use."""
+        return self._auto_selector
+    
+    @property
+    def visualizer(self) -> VisualizationHelper:
+        """Access the visualization helper for external use."""
+        return self._visualizer
     
     def _select_backend(self, use_cuda: Optional[bool], use_mps: Optional[bool]) -> str:
         """Select the best available backend."""

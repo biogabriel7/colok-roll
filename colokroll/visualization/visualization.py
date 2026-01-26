@@ -256,8 +256,9 @@ class Visualizer:
                 try:
                     import matplotlib.colors as mcolors
                     color = mcolors.to_rgb(color_name)
-                except:
-                    color = (1, 1, 1)  # Default to white
+                except (ValueError, KeyError):
+                    # Invalid color name - fall back to white
+                    color = (1, 1, 1)
             
             # Normalize channel
             channel_data = image[:, :, c].astype(np.float32)

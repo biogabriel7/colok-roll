@@ -54,14 +54,25 @@ except ImportError:  # pragma: no cover
 
 
 # =============================================================================
-# Module-level constants
+# Module-level constants (imported from centralized constants module)
 # =============================================================================
-_EPSILON = 1e-12
-_DEFAULT_MIN_DISTANCE_PX = 3  # Minimum distance between puncta seeds (pixels)
-_DEFAULT_SNR_THRESHOLD = 3.0  # Default SNR threshold for foreground
-_DEFAULT_EXPECTED_DIAMETER_UM = 0.5  # Expected puncta diameter in µm
-_DEFAULT_MIN_DIAMETER_UM = 0.2  # Minimum puncta diameter in µm
-_DEFAULT_MAX_DIAMETER_UM = 2.0  # Maximum puncta diameter in µm
+from .constants import (
+    EPSILON as _EPSILON,
+    DEFAULT_MIN_DISTANCE_PX as _DEFAULT_MIN_DISTANCE_PX,
+    DEFAULT_SNR_THRESHOLD as _DEFAULT_SNR_THRESHOLD,
+    DEFAULT_EXPECTED_DIAMETER_UM as _DEFAULT_EXPECTED_DIAMETER_UM,
+    DEFAULT_MIN_DIAMETER_UM as _DEFAULT_MIN_DIAMETER_UM,
+    DEFAULT_MAX_DIAMETER_UM as _DEFAULT_MAX_DIAMETER_UM,
+    MAD_TO_STD,
+    LOG_SIGMA_FACTOR,
+    MIN_BACKGROUND_SAMPLES,
+    FALLBACK_EXPECTED_DIAMETER_PX,
+    FALLBACK_MIN_DIAMETER_PX,
+    FALLBACK_MAX_DIAMETER_PX,
+    CHANNEL_DIM_HEURISTIC,
+    BIGFISH_THRESHOLD_SAMPLES,
+    MAX_AREA_SAFETY_MARGIN,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -178,8 +189,8 @@ def _load_single_channel(
             return arr, ch_name, names
         elif arr.ndim == 3:
             # Could be (Z,Y,X) single channel or (Y,X,C) multichannel
-            # Heuristic: if last dim is small (<= 6), treat as channels
-            if arr.shape[-1] <= 6:
+            # Heuristic: if last dim is small (<= CHANNEL_DIM_HEURISTIC), treat as channels
+            if arr.shape[-1] <= CHANNEL_DIM_HEURISTIC:
                 # (Y, X, C)
                 return arr[..., ch_idx], ch_name, names
             else:
@@ -241,31 +252,15 @@ def _project_to_2d(
 
 
 def _load_mask(mask: Union[str, Path, np.ndarray]) -> np.ndarray:
-    """Load and validate a 2D labeled mask (replicates colocalization helper)."""
-    if isinstance(mask, (str, Path)):
-        if ImageLoader is None:
-            raise RuntimeError("ImageLoader not available; pass a numpy array instead.")
-        m = ImageLoader().load_tif_mask(str(mask))
-    else:
-        m = np.asarray(mask)
-
-    # Reduce 3D to best 2D slice
-    if m.ndim == 3:
-        labeled_counts = [(z_idx, int((m[z_idx] > 0).sum())) for z_idx in range(m.shape[0])]
-        z_best = max(labeled_counts, key=lambda t: t[1])[0]
-        logger.info(f"3D mask detected; reducing to 2D by selecting z={z_best}")
-        m = m[z_best]
-
-    if m.ndim != 2:
-        raise ValueError(f"Mask must be 2D after reduction; got {m.shape}")
-
-    # Coerce dtype
-    if np.issubdtype(m.dtype, np.integer):
-        return m.astype(np.int32)
-    elif 0.0 <= float(np.nanmin(m)) <= float(np.nanmax(m)) <= 1.0:
-        return (m > 0.5).astype(np.int32)
-    else:
-        return np.rint(m).astype(np.int32)
+    """Load and validate a 2D labeled mask using shared utilities."""
+    from ..core.mask_utils import load_and_validate_mask
+    
+    # Create loader function if ImageLoader is available
+    loader_func = None
+    if ImageLoader is not None:
+        loader_func = lambda path: ImageLoader().load_tif_mask(path)
+    
+    return load_and_validate_mask(mask, image_loader_func=loader_func)
 
 
 def _laplacian_of_gaussian(
@@ -321,14 +316,14 @@ def _estimate_background_mad(
     p_hi = np.percentile(vals, percentile_high)
     bg_vals = vals[(vals >= p_lo) & (vals <= p_hi)]
 
-    if bg_vals.size < 10:
+    if bg_vals.size < MIN_BACKGROUND_SAMPLES:
         bg_vals = vals
 
     bg_mean = float(np.median(bg_vals))
     # MAD = median absolute deviation
     mad = float(np.median(np.abs(bg_vals - bg_mean)))
     # Convert MAD to approximate std (for Gaussian: std ≈ 1.4826 * MAD)
-    mad_std = max(mad * 1.4826, _EPSILON)
+    mad_std = max(mad * MAD_TO_STD, _EPSILON)
 
     return bg_mean, mad_std
 
@@ -607,7 +602,7 @@ def _detect_spots_bigfish(
         # Generate threshold range for elbow curve
         max_val = float(image_filtered.max())
         min_val = float(image_filtered[image_filtered > 0].min()) if np.any(image_filtered > 0) else 0
-        thresholds = np.linspace(min_val, max_val, num=100)
+        thresholds = np.linspace(min_val, max_val, num=BIGFISH_THRESHOLD_SAMPLES)
 
         # Get local maxima mask and convert to coordinates
         local_maxima_mask = bigfish_detection.local_maximum_detection(
@@ -716,15 +711,15 @@ def _measure_puncta(
         equiv_diameter_px = prop.equivalent_diameter
         equiv_diameter_um = _px_to_um(equiv_diameter_px, pixel_size_um) if pixel_size_um else float("nan")
 
-        # Shape metrics (guard against degenerate cases)
+        # Shape metrics (guard against degenerate cases like single-pixel regions)
         try:
             eccentricity = float(prop.eccentricity)
-        except Exception:
+        except (ValueError, ZeroDivisionError, RuntimeWarning):
             eccentricity = float("nan")
 
         try:
             solidity = float(prop.solidity)
-        except Exception:
+        except (ValueError, ZeroDivisionError, RuntimeWarning):
             solidity = float("nan")
 
         # Intensity
@@ -933,6 +928,128 @@ def _compute_summary(per_cell_list: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 # =============================================================================
+# Detection Parameter Helpers
+# =============================================================================
+
+def _convert_detection_params_to_pixels(
+    pixel_size_um: Optional[float],
+    expected_diameter_um: float,
+    min_diameter_um: float,
+    max_diameter_um: float,
+    min_distance_um: Optional[float],
+) -> Tuple[float, float, float, float]:
+    """Convert detection parameters from µm to pixels."""
+    if pixel_size_um is not None and pixel_size_um > 0:
+        expected_diameter_px = _um_to_px(expected_diameter_um, pixel_size_um)
+        min_diameter_px = _um_to_px(min_diameter_um, pixel_size_um)
+        max_diameter_px = _um_to_px(max_diameter_um, pixel_size_um)
+        if min_distance_um is not None:
+            min_distance_px = _um_to_px(min_distance_um, pixel_size_um)
+        else:
+            min_distance_px = expected_diameter_px
+    else:
+        expected_diameter_px = FALLBACK_EXPECTED_DIAMETER_PX
+        min_diameter_px = FALLBACK_MIN_DIAMETER_PX
+        max_diameter_px = FALLBACK_MAX_DIAMETER_PX
+        min_distance_px = expected_diameter_px if min_distance_um is None else min_distance_um
+        logger.warning("pixel_size_um not provided; using pixel-based defaults for detection")
+    
+    return expected_diameter_px, min_diameter_px, max_diameter_px, min_distance_px
+
+
+def _detect_puncta_log_method(
+    image_2d: np.ndarray,
+    log_sigma: float,
+    min_distance_px: float,
+    snr_threshold: float,
+    bg_mean: float,
+    bg_std: float,
+    cell_region_mask: np.ndarray,
+) -> np.ndarray:
+    """Detect puncta using LoG + watershed method."""
+    # LoG filter for blob enhancement
+    log_image = _laplacian_of_gaussian(image_2d, sigma=log_sigma)
+    
+    # Create foreground mask using SNR threshold
+    snr_image = (image_2d - bg_mean) / bg_std
+    foreground_mask = (snr_image >= snr_threshold) & cell_region_mask
+    
+    # Detect seeds (local maxima on LoG)
+    log_threshold = 0.0
+    seeds = _detect_puncta_seeds(
+        log_image,
+        min_distance=int(max(1, min_distance_px)),
+        threshold_abs=log_threshold,
+        mask=foreground_mask,
+    )
+    logger.info(f"Detected {len(seeds)} puncta seeds")
+    
+    # Segment puncta via watershed
+    return _segment_puncta_watershed(image_2d, seeds, foreground_mask)
+
+
+def _detect_puncta_bigfish_method(
+    image_2d: np.ndarray,
+    expected_diameter_px: float,
+    cell_mask: np.ndarray,
+    return_threshold_data: bool,
+) -> Tuple[np.ndarray, Optional[Dict[str, Any]]]:
+    """Detect puncta using BigFISH method."""
+    if not HAS_BIGFISH:
+        raise RuntimeError(
+            "BigFISH is required for detection_method='bigfish'. "
+            "Install with: pip install big-fish"
+        )
+    
+    spot_radius_px = expected_diameter_px / 2.0
+    threshold_data = None
+    
+    if return_threshold_data:
+        _spots, puncta_labels, threshold_data = _detect_spots_bigfish(
+            image_2d,
+            spot_radius_px=spot_radius_px,
+            cell_mask=cell_mask,
+            return_threshold_data=True,
+        )
+    else:
+        _spots, puncta_labels = _detect_spots_bigfish(
+            image_2d,
+            spot_radius_px=spot_radius_px,
+            cell_mask=cell_mask,
+        )
+    
+    return puncta_labels, threshold_data
+
+
+def _filter_puncta_by_size(
+    puncta_labels: np.ndarray,
+    min_area_px: int,
+    max_area_px: Optional[int],
+) -> np.ndarray:
+    """Filter puncta by size constraints."""
+    if min_area_px <= 0 and max_area_px is None:
+        return puncta_labels
+    
+    props = measure.regionprops(puncta_labels)
+    keep_labels = []
+    
+    for prop in props:
+        if prop.area < min_area_px:
+            continue
+        if max_area_px is not None and prop.area > max_area_px:
+            continue
+        keep_labels.append(prop.label)
+    
+    # Relabel to keep only valid puncta
+    filtered_labels = np.zeros_like(puncta_labels)
+    for new_id, old_id in enumerate(keep_labels, start=1):
+        filtered_labels[puncta_labels == old_id] = new_id
+    
+    logger.info(f"After size filtering: {len(keep_labels)} puncta remain")
+    return filtered_labels
+
+
+# =============================================================================
 # Main API
 # =============================================================================
 
@@ -1020,50 +1137,32 @@ def compute_puncta(
     if not HAS_SKIMAGE:
         raise RuntimeError("scikit-image is required for puncta detection. Install with: pip install scikit-image")
 
-    # Load channel data
+    # Phase 1: Load and prepare data
     channel_data, ch_name, all_names = _load_single_channel(image, channel, channel_names)
     original_shape = channel_data.shape
     logger.info(f"Loaded channel '{ch_name}' with shape {original_shape}")
 
-    # Project to 2D if needed
     image_2d = _project_to_2d(channel_data, projection=projection)
     image_2d = image_2d.astype(np.float64)
     logger.info(f"Projected to 2D: {image_2d.shape} (projection='{projection}')")
 
-    # Load cell mask
     cell_mask = _load_mask(mask)
     if cell_mask.shape != image_2d.shape:
         raise ValueError(f"Mask shape {cell_mask.shape} must match image shape {image_2d.shape}")
 
-    # Optionally remove label 1 (Cellpose background)
     if drop_label_1 and np.any(cell_mask == 1):
         cell_mask[cell_mask == 1] = 0
         logger.info("Removed cell label 1 from mask (assumed Cellpose background)")
 
-    # Convert µm parameters to pixels
-    if pixel_size_um is not None and pixel_size_um > 0:
-        expected_diameter_px = _um_to_px(expected_diameter_um, pixel_size_um)
-        min_diameter_px = _um_to_px(min_diameter_um, pixel_size_um)
-        max_diameter_px = _um_to_px(max_diameter_um, pixel_size_um)
-        if min_distance_um is not None:
-            min_distance_px = _um_to_px(min_distance_um, pixel_size_um)
-        else:
-            min_distance_px = expected_diameter_px
-    else:
-        # Use pixel-based defaults
-        expected_diameter_px = 5.0
-        min_diameter_px = 2.0
-        max_diameter_px = 20.0
-        min_distance_px = expected_diameter_px if min_distance_um is None else min_distance_um
-        logger.warning("pixel_size_um not provided; using pixel-based defaults for detection")
+    # Phase 2: Convert parameters to pixels
+    expected_diameter_px, min_diameter_px, max_diameter_px, min_distance_px = _convert_detection_params_to_pixels(
+        pixel_size_um, expected_diameter_um, min_diameter_um, max_diameter_um, min_distance_um
+    )
 
-    # Compute sigma for LoG (sigma ≈ diameter / (2 * sqrt(2)))
-    log_sigma = expected_diameter_px / (2.0 * math.sqrt(2))
-    log_sigma = max(0.5, log_sigma)
-
-    # Compute max_area_px if not provided
+    log_sigma = max(0.5, expected_diameter_px / LOG_SIGMA_FACTOR)
+    
     if max_area_px is None:
-        max_area_px = int(math.pi * (max_diameter_px / 2) ** 2 * 2)  # 2x for safety margin
+        max_area_px = int(math.pi * (max_diameter_px / 2) ** 2 * MAX_AREA_SAFETY_MARGIN)
 
     logger.info(
         f"Detection params: method={detection_method}, log_sigma={log_sigma:.2f}px, "
@@ -1071,78 +1170,30 @@ def compute_puncta(
         f"min_area={min_area_px}px, max_area={max_area_px}px"
     )
 
-    # Step 1: Estimate background (within cell regions)
+    # Phase 3: Estimate background
     cell_region_mask = cell_mask > 0
     bg_mean, bg_std = _estimate_background_mad(image_2d, mask=cell_region_mask)
     logger.info(f"Background estimate: mean={bg_mean:.2f}, std={bg_std:.2f}")
 
-    # Step 2-5: Detection (method-dependent)
+    # Phase 4: Detect puncta
     threshold_data = None
     if detection_method.lower() == "bigfish":
-        # BigFISH detection with automatic thresholding
-        if not HAS_BIGFISH:
-            raise RuntimeError(
-                "BigFISH is required for detection_method='bigfish'. "
-                "Install with: pip install big-fish"
-            )
-        spot_radius_px = expected_diameter_px / 2.0
-        if return_threshold_data:
-            _spots, puncta_labels, threshold_data = _detect_spots_bigfish(
-                image_2d,
-                spot_radius_px=spot_radius_px,
-                cell_mask=cell_mask,
-                return_threshold_data=True,
-            )
-        else:
-            _spots, puncta_labels = _detect_spots_bigfish(
-                image_2d,
-                spot_radius_px=spot_radius_px,
-                cell_mask=cell_mask,
-            )
-    elif detection_method.lower() == "log":
-        # Original LoG + watershed method
-        # Step 2: LoG filter for blob enhancement
-        log_image = _laplacian_of_gaussian(image_2d, sigma=log_sigma)
-
-        # Step 3: Create foreground mask using SNR threshold
-        snr_image = (image_2d - bg_mean) / bg_std
-        foreground_mask = (snr_image >= snr_threshold) & cell_region_mask
-
-        # Step 4: Detect seeds (local maxima on LoG)
-        log_threshold = 0.0
-        seeds = _detect_puncta_seeds(
-            log_image,
-            min_distance=int(max(1, min_distance_px)),
-            threshold_abs=log_threshold,
-            mask=foreground_mask,
+        puncta_labels, threshold_data = _detect_puncta_bigfish_method(
+            image_2d, expected_diameter_px, cell_mask, return_threshold_data
         )
-        logger.info(f"Detected {len(seeds)} puncta seeds")
-
-        # Step 5: Segment puncta via watershed
-        puncta_labels = _segment_puncta_watershed(image_2d, seeds, foreground_mask)
+    elif detection_method.lower() == "log":
+        puncta_labels = _detect_puncta_log_method(
+            image_2d, log_sigma, min_distance_px, snr_threshold, 
+            bg_mean, bg_std, cell_region_mask
+        )
     else:
         raise ValueError(
             f"Unknown detection_method '{detection_method}'. "
             "Supported: 'log', 'bigfish'"
         )
 
-    # Step 6: Filter by size
-    if min_area_px > 0 or max_area_px is not None:
-        props = measure.regionprops(puncta_labels)
-        keep_labels = []
-        for prop in props:
-            if prop.area < min_area_px:
-                continue
-            if max_area_px is not None and prop.area > max_area_px:
-                continue
-            keep_labels.append(prop.label)
-
-        # Relabel to keep only valid puncta
-        filtered_labels = np.zeros_like(puncta_labels)
-        for new_id, old_id in enumerate(keep_labels, start=1):
-            filtered_labels[puncta_labels == old_id] = new_id
-        puncta_labels = filtered_labels
-        logger.info(f"After size filtering: {len(keep_labels)} puncta remain")
+    # Phase 5: Filter by size
+    puncta_labels = _filter_puncta_by_size(puncta_labels, min_area_px, max_area_px)
 
     # Step 7: Measure puncta
     puncta_list = _measure_puncta(

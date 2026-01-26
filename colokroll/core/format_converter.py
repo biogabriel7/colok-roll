@@ -19,11 +19,15 @@ import numpy as np
 import tifffile
 import nd2
 
-logger = logging.getLogger(__name__)
+from .constants import (
+    STANDARD_AXES,
+    EXPECTED_NDIM,
+    MAX_CHANNEL_COUNT,
+    MAX_CHANNEL_WARNING,
+    CHANNEL_NAME_TEMPLATE,
+)
 
-# Standard axis order for all output images
-STANDARD_AXES = 'ZYXC'
-EXPECTED_NDIM = 4
+logger = logging.getLogger(__name__)
 
 
 class FormatConverter:
@@ -40,6 +44,86 @@ class FormatConverter:
         """
         self.preserve_original = preserve_original
         self.metadata_cache: Dict[str, Dict[str, Any]] = {}
+    
+    def _convert_2d_to_zyxc(self, data: np.ndarray, original_shape: tuple) -> np.ndarray:
+        """Convert 2D (YX) array to 4D ZYXC."""
+        data = data[np.newaxis, :, :, np.newaxis]
+        logger.info(f"Expanded 2D (YX) to 4D (ZYXC): {original_shape} -> {data.shape}")
+        return data
+    
+    def _convert_3d_to_zyxc(self, data: np.ndarray, source_axes: Optional[str], original_shape: tuple) -> np.ndarray:
+        """Convert 3D array to 4D ZYXC based on source axes or heuristics."""
+        if source_axes:
+            source_upper = source_axes.upper()
+            if source_upper == 'ZYX':
+                data = data[..., np.newaxis]
+            elif source_upper == 'YXC':
+                data = data[np.newaxis, ...]
+            elif source_upper == 'CYX':
+                data = np.transpose(data, (1, 2, 0))  # CYX -> YXC
+                data = data[np.newaxis, ...]  # YXC -> ZYXC
+            else:
+                data = data[..., np.newaxis]
+        else:
+            # Heuristic: if last dim is small, assume it's channels (YXC)
+            is_likely_yxc = (
+                data.shape[-1] <= MAX_CHANNEL_COUNT and 
+                data.shape[-1] < data.shape[0] and 
+                data.shape[-1] < data.shape[1]
+            )
+            if is_likely_yxc:
+                data = data[np.newaxis, ...]
+            else:
+                data = data[..., np.newaxis]
+        logger.info(f"Expanded 3D to 4D (ZYXC): {original_shape} -> {data.shape}")
+        return data
+    
+    def _reorder_4d_to_zyxc(self, data: np.ndarray, source_axes: Optional[str], original_shape: tuple) -> np.ndarray:
+        """Reorder 4D array to ZYXC axis order."""
+        if not source_axes or source_axes.upper() == 'ZYXC':
+            logger.info(f"Data already 4D ZYXC: {data.shape}")
+            return data
+        
+        # Mapping of axis orders to transpose indices
+        axis_transpose_map = {
+            'CZYX': (1, 2, 3, 0),
+            'ZCYX': (0, 2, 3, 1),
+            'YXZC': (2, 0, 1, 3),
+            'YXCZ': (3, 0, 1, 2),
+            'CXYZ': (3, 2, 1, 0),
+            'XYZC': (2, 1, 0, 3),
+        }
+        
+        source_upper = source_axes.upper()
+        if source_upper in axis_transpose_map:
+            data = np.transpose(data, axis_transpose_map[source_upper])
+            logger.info(f"Reordered 4D from {source_axes} to ZYXC: {original_shape} -> {data.shape}")
+        else:
+            logger.warning(f"Unknown 4D axis order: {source_axes}, assuming ZYXC")
+        
+        return data
+    
+    def _handle_5d_data(self, data: np.ndarray, source_axes: Optional[str], original_shape: tuple) -> np.ndarray:
+        """Handle 5D data by removing time dimension and recursively converting."""
+        logger.warning(f"5D data detected: shape={original_shape}, axes={source_axes}")
+        
+        if source_axes:
+            source_upper = source_axes.upper()
+            if 'T' in source_upper:
+                t_idx = source_upper.index('T')
+                data = np.take(data, 0, axis=t_idx)
+                remaining_axes = source_upper.replace('T', '')
+                logger.info(f"Removed time dimension (axis {t_idx}), taking first timepoint")
+                return self._ensure_4d_zyxc(data, source_axes=remaining_axes)
+            else:
+                logger.warning("5D data without T axis, taking first slice of dim 0")
+                data = data[0]
+                remaining_axes = source_upper[1:] if len(source_upper) > 1 else None
+                return self._ensure_4d_zyxc(data, source_axes=remaining_axes)
+        else:
+            logger.warning(f"5D data detected without axis info, taking first timepoint: {original_shape}")
+            data = data[0]
+            return self._ensure_4d_zyxc(data, source_axes=None)
     
     def _ensure_4d_zyxc(self, data: np.ndarray, source_axes: str = None) -> np.ndarray:
         """Ensure data is 4D with ZYXC axis order.
@@ -59,87 +143,15 @@ class FormatConverter:
         
         logger.info(f"Standardizing array: shape={original_shape}, source_axes={source_axes}")
         
-        # Handle based on current dimensionality
+        # Dispatch based on dimensionality
         if data.ndim == 2:
-            # YX -> ZYXC (add Z and C dimensions)
-            data = data[np.newaxis, :, :, np.newaxis]
-            logger.info(f"Expanded 2D (YX) to 4D (ZYXC): {original_shape} -> {data.shape}")
-            
+            data = self._convert_2d_to_zyxc(data, original_shape)
         elif data.ndim == 3:
-            # Could be ZYX or YXC - need to determine based on source_axes or heuristics
-            if source_axes:
-                if source_axes.upper() == 'ZYX':
-                    # ZYX -> ZYXC (add C dimension)
-                    data = data[..., np.newaxis]
-                elif source_axes.upper() == 'YXC':
-                    # YXC -> ZYXC (add Z dimension)
-                    data = data[np.newaxis, ...]
-                elif source_axes.upper() == 'CYX':
-                    # CYX -> ZYXC (transpose and add Z)
-                    data = np.transpose(data, (1, 2, 0))  # CYX -> YXC
-                    data = data[np.newaxis, ...]  # YXC -> ZYXC
-                else:
-                    # Default: assume ZYX, add C
-                    data = data[..., np.newaxis]
-            else:
-                # Heuristic: if last dim is small (<=10), assume it's channels (YXC)
-                if data.shape[-1] <= 10 and data.shape[-1] < data.shape[0] and data.shape[-1] < data.shape[1]:
-                    # Likely YXC -> ZYXC
-                    data = data[np.newaxis, ...]
-                else:
-                    # Assume ZYX -> ZYXC
-                    data = data[..., np.newaxis]
-            logger.info(f"Expanded 3D to 4D (ZYXC): {original_shape} -> {data.shape}")
-            
+            data = self._convert_3d_to_zyxc(data, source_axes, original_shape)
         elif data.ndim == 4:
-            # Already 4D, but may need reordering
-            if source_axes and source_axes.upper() != 'ZYXC':
-                # Reorder axes to ZYXC
-                source_upper = source_axes.upper()
-                if source_upper == 'CZYX':
-                    data = np.transpose(data, (1, 2, 3, 0))  # CZYX -> ZYXC
-                elif source_upper == 'ZCYX':
-                    data = np.transpose(data, (0, 2, 3, 1))  # ZCYX -> ZYXC
-                elif source_upper == 'YXZC':
-                    data = np.transpose(data, (2, 0, 1, 3))  # YXZC -> ZYXC
-                elif source_upper == 'YXCZ':
-                    data = np.transpose(data, (3, 0, 1, 2))  # YXCZ -> ZYXC
-                elif source_upper == 'CXYZ':
-                    data = np.transpose(data, (3, 2, 1, 0))  # CXYZ -> ZYXC (reverse + channel last)
-                elif source_upper == 'XYZC':
-                    data = np.transpose(data, (2, 1, 0, 3))  # XYZC -> ZYXC
-                else:
-                    logger.warning(f"Unknown 4D axis order: {source_axes}, assuming ZYXC")
-                logger.info(f"Reordered 4D from {source_axes} to ZYXC: {original_shape} -> {data.shape}")
-            else:
-                logger.info(f"Data already 4D ZYXC: {data.shape}")
-                
+            data = self._reorder_4d_to_zyxc(data, source_axes, original_shape)
         elif data.ndim == 5:
-            # TCZYX, TZCYX, etc. - handle time dimension
-            logger.warning(f"5D data detected: shape={original_shape}, axes={source_axes}")
-            
-            if source_axes:
-                source_upper = source_axes.upper()
-                # Find time dimension and remove it (take first timepoint)
-                if 'T' in source_upper:
-                    t_idx = source_upper.index('T')
-                    data = np.take(data, 0, axis=t_idx)
-                    # Remove T from axes string for recursive call
-                    remaining_axes = source_upper.replace('T', '')
-                    logger.info(f"Removed time dimension (axis {t_idx}), taking first timepoint")
-                    return self._ensure_4d_zyxc(data, source_axes=remaining_axes)
-                else:
-                    # No T, just take first slice of first dimension
-                    logger.warning("5D data without T axis, taking first slice of dim 0")
-                    data = data[0]
-                    remaining_axes = source_upper[1:] if len(source_upper) > 1 else None
-                    return self._ensure_4d_zyxc(data, source_axes=remaining_axes)
-            else:
-                # No source_axes provided, assume first axis is T
-                logger.warning(f"5D data detected without axis info, taking first timepoint: {original_shape}")
-                data = data[0]
-                return self._ensure_4d_zyxc(data, source_axes=None)
-            
+            return self._handle_5d_data(data, source_axes, original_shape)
         else:
             raise ValueError(
                 f"Cannot convert {data.ndim}D array to 4D ZYXC format. "
@@ -179,7 +191,7 @@ class FormatConverter:
             raise ValueError(f"Invalid spatial dimensions: Y={y}, X={x}. Must be positive.")
         if c < 1:
             raise ValueError(f"Invalid channel count: {c}. Must have at least 1 channel.")
-        if c > 20:
+        if c > MAX_CHANNEL_WARNING:
             logger.warning(f"Unusually high channel count: {c}. Verify axis order is correct.")
         
         logger.info(f"Validated 4D ZYXC array: Z={z}, Y={y}, X={x}, C={c}")
@@ -551,15 +563,7 @@ class FormatConverter:
             # Update channel names if needed
             # Check if bioio returned generic/poor quality names
             if not channel_names or len(channel_names) != c:
-                # Try to parse from filename
-                channel_names = self._parse_channel_names_from_filename(input_path.name, c)
-            elif all(name.startswith(('Ch', 'Channel', 'C')) or name.isdigit() for name in channel_names):
-                # bioio returned generic names like "Ch1", "Channel_0", etc.
-                logger.info("bioio returned generic channel names, trying filename parsing...")
-                parsed_names = self._parse_channel_names_from_filename(input_path.name, c)
-                # Use parsed names if they look better than generic ones
-                if any(not name.startswith('Channel_') for name in parsed_names):
-                    channel_names = parsed_names
+                channel_names = [CHANNEL_NAME_TEMPLATE.format(i) for i in range(c)]
             
             # Build metadata dictionary with standardized dimensions
             metadata: Dict[str, Any] = {
@@ -722,6 +726,206 @@ class FormatConverter:
         
         return metadata
     
+    def _log_nd2_reader_info(self, reader: nd2reader.ND2Reader, z_levels: int, channels: int) -> None:
+        """Log ND2 reader metadata for debugging."""
+        logger.info(f"Expected Z levels: {z_levels}, Channels: {channels}")
+        logger.info(f"Reader axes: {reader.axes}")
+        logger.info(f"Reader sizes: {reader.sizes}")
+        logger.info(f"Available frames: {len(reader)}")
+        logger.info(f"Frame shape: {reader[0].shape}")
+    
+    def _check_nd2_iteration_capability(self, reader: nd2reader.ND2Reader) -> None:
+        """Check and log ND2 reader iteration capabilities."""
+        original_iter_axes = getattr(reader, 'iter_axes', [])
+        
+        for axis in ['c', 'z']:
+            try:
+                reader.iter_axes = axis
+                logger.info(f"Can iterate over {axis}: True")
+            except Exception as e:
+                logger.info(f"Can iterate over {axis}: False ({e})")
+        
+        try:
+            reader.iter_axes = original_iter_axes
+        except (AttributeError, TypeError, ValueError):
+            # nd2reader may not support iter_axes restoration on some file types
+            pass
+    
+    def _reshape_frames_to_zyxc(self, all_data: list, z_levels: int, channels: int) -> np.ndarray:
+        """Reshape collected frames to ZYXC format."""
+        frame_array = np.array(all_data)  # (Z*C, Y, X)
+        reshaped = frame_array.reshape(z_levels, channels, frame_array.shape[1], frame_array.shape[2])
+        result = np.transpose(reshaped, (0, 2, 3, 1))
+        return result
+    
+    def _validate_nd2_result(self, result: np.ndarray) -> None:
+        """Validate ND2 extraction result by logging statistics."""
+        if result.shape[0] > 1:
+            z_means = [result[z, :, :, 0].mean() for z in range(min(5, result.shape[0]))]
+            logger.info(f"Z-slice means (ch0): {z_means}")
+        
+        if result.shape[3] > 1:
+            c_means = [result[0, :, :, c].mean() for c in range(result.shape[3])]
+            logger.info(f"Channel means (z0): {c_means}")
+    
+    def _extract_channels_manually(
+        self, reader: nd2reader.ND2Reader, z_levels: int, channels: int, fallback_data: list
+    ) -> np.ndarray:
+        """Manually extract channels for each z-slice when iteration fails."""
+        logger.warning("Got z-slices but no channel separation - trying channel extraction per z")
+        
+        # Determine fallback frame shape from available data or reader metadata
+        if fallback_data:
+            fallback_shape = fallback_data[0].shape
+        else:
+            # Try to get dimensions from reader metadata
+            sizes = getattr(reader, 'sizes', {})
+            height = sizes.get('y', sizes.get('Y', 0))
+            width = sizes.get('x', sizes.get('X', 0))
+            if height > 0 and width > 0:
+                fallback_shape = (height, width)
+            else:
+                # Last resort: try reading first frame to get shape
+                try:
+                    fallback_shape = reader[0].shape
+                except Exception:
+                    logger.error("Cannot determine frame dimensions - using reader default")
+                    fallback_shape = (reader.metadata.get('height', 512), 
+                                     reader.metadata.get('width', 512))
+        
+        multichannel_data = []
+        for z in range(z_levels):
+            z_channels = []
+            for c in range(channels):
+                try:
+                    reader.default_coords = {'z': z, 'c': c, 't': 0}
+                    frame = reader[0]
+                    z_channels.append(frame)
+                    
+                    if z == 0:
+                        logger.info(f"Manual z={z}, c={c}: shape={frame.shape}, mean={frame.mean():.2f}")
+                except Exception as e:
+                    logger.error(f"Manual extraction failed z={z}, c={c}: {e}")
+                    z_channels.append(fallback_data[0] if fallback_data else np.zeros(fallback_shape))
+            
+            multichannel_data.append(np.stack(z_channels, axis=-1))
+        
+        return np.stack(multichannel_data, axis=0)
+    
+    def _read_multichannel_multiZ(
+        self, reader: nd2reader.ND2Reader, z_levels: int, channels: int
+    ) -> np.ndarray:
+        """Read multi-channel, multi-z ND2 data using iteration."""
+        logger.info("Using nd2reader iteration approach for multi-channel z-stack")
+        
+        reader.iter_axes = ['z', 'c']
+        reader.bundle_axes = ['y', 'x']
+        
+        logger.info(f"Set iter_axes to {reader.iter_axes}")
+        logger.info(f"Reader now has {len(reader)} frames after iteration setup")
+        
+        all_data = []
+        frame_count = 0
+        max_frames = z_levels * channels * 2  # Safety margin
+        
+        for frame in reader:
+            all_data.append(frame)
+            frame_count += 1
+            
+            if frame_count <= 10:
+                logger.info(f"Iteration frame {frame_count}: shape={frame.shape}, mean={frame.mean():.2f}")
+            
+            if frame_count >= max_frames:
+                logger.warning(f"Safety break at {frame_count} frames")
+                break
+        
+        logger.info(f"Iteration collected {len(all_data)} frames")
+        
+        if len(all_data) == z_levels * channels:
+            result = self._reshape_frames_to_zyxc(all_data, z_levels, channels)
+            logger.info(f"Perfect iteration result shape: {result.shape}")
+            self._validate_nd2_result(result)
+            return result
+        
+        if len(all_data) == z_levels:
+            result = self._extract_channels_manually(reader, z_levels, channels, all_data)
+            logger.info(f"Manual channel extraction result shape: {result.shape}")
+            self._validate_nd2_result(result)
+            return result
+        
+        logger.error(f"Unexpected number of frames from iteration: {len(all_data)}")
+        return np.array(all_data)
+    
+    def _read_multichannel_singleZ(self, reader: nd2reader.ND2Reader, channels: int) -> np.ndarray:
+        """Read multi-channel, single-z ND2 data."""
+        all_data = []
+        for c in range(channels):
+            reader.default_coords['c'] = c
+            all_data.append(reader[0])
+        
+        result = np.stack(all_data, axis=-1)[np.newaxis, ...]
+        logger.info(f"Extracted shape: {result.shape}")
+        return result
+    
+    def _read_singlechannel_multiZ(self, reader: nd2reader.ND2Reader, z_levels: int) -> np.ndarray:
+        """Read single-channel, multi-z ND2 data."""
+        all_data = []
+        for z in range(z_levels):
+            reader.default_coords['z'] = z
+            all_data.append(reader[0])
+        
+        result = np.stack(all_data, axis=0)[..., np.newaxis]
+        logger.info(f"Extracted shape: {result.shape}")
+        return result
+    
+    def _read_singlechannel_singleZ(self, reader: nd2reader.ND2Reader) -> np.ndarray:
+        """Read single-channel, single-z ND2 data."""
+        frame = reader[0]
+        result = frame[np.newaxis, ..., np.newaxis]
+        logger.info(f"Extracted shape: {result.shape}")
+        return result
+    
+    def _read_nd2_as_array(self, reader: nd2reader.ND2Reader) -> np.ndarray:
+        """Read ND2 file as numpy array.
+        
+        Args:
+            reader: ND2Reader instance.
+            
+        Returns:
+            Image array with dimensions (Z, Y, X, C) or appropriate subset.
+        """
+        z_levels = len(reader.metadata.get('z_levels', [1]))
+        channels = len(reader.metadata.get('channels', [])) or 1
+        
+        self._log_nd2_reader_info(reader, z_levels, channels)
+        self._check_nd2_iteration_capability(reader)
+        
+        try:
+            has_z = 'z' in reader.axes
+            has_c = 'c' in reader.axes
+            
+            if has_z and has_c:
+                try:
+                    return self._read_multichannel_multiZ(reader, z_levels, channels)
+                except Exception as e:
+                    logger.error(f"Iteration approach failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    logger.info("Using basic fallback")
+                    frame = reader[0]
+                    return frame[np.newaxis, ..., np.newaxis]
+            
+            if has_c:
+                return self._read_multichannel_singleZ(reader, channels)
+            
+            if has_z:
+                return self._read_singlechannel_multiZ(reader, z_levels)
+            
+            return self._read_singlechannel_singleZ(reader)
+            
+        except Exception as e:
+            logger.error(f"Failed to read ND2 data: {e}")
+            raise ValueError(f"Could not read ND2 data: {e}")
     
     def _save_as_tiff(
         self, 
@@ -749,7 +953,7 @@ class FormatConverter:
         # Get channel names
         channel_names = metadata.get('channel_names', [])
         if not channel_names or len(channel_names) != c:
-            channel_names = [f'Channel_{i}' for i in range(c)]
+            channel_names = [CHANNEL_NAME_TEMPLATE.format(i) for i in range(c)]
             logger.warning(f"Channel names missing or mismatched, using defaults: {channel_names}")
         
         # For proper multi-channel OME-TIFF, convert ZYXC to ZCYX
@@ -927,7 +1131,7 @@ class FormatConverter:
                             pixel_size_um = (pixel_size_x + pixel_size_y) / 2
                     
                     channels = root.findall('.//ome:Channel', namespaces)
-                    channel_names = [ch.get('Name', f'Channel_{i}') for i, ch in enumerate(channels)]
+                    channel_names = [ch.get('Name', CHANNEL_NAME_TEMPLATE.format(i)) for i, ch in enumerate(channels)]
                 
                 # For 4D ZYXC format, dimensions are straightforward
                 if data.ndim == EXPECTED_NDIM:
@@ -940,7 +1144,7 @@ class FormatConverter:
                     c = data.shape[-1] if data.ndim >= 4 else 1
                 
                 if not channel_names:
-                    channel_names = [f'Channel_{i}' for i in range(c)]
+                    channel_names = [CHANNEL_NAME_TEMPLATE.format(i) for i in range(c)]
                 
                 metadata = {
                     "original_format": "ome-tiff",
