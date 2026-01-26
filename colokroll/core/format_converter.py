@@ -12,7 +12,7 @@ All output images are standardized to 4D arrays with ZYXC axis order:
 import os
 import json
 from pathlib import Path
-from typing import Dict, Any, Optional, Union, Tuple
+from typing import Dict, Any, Optional, Union, Tuple, List
 import logging
 
 import numpy as np
@@ -371,11 +371,77 @@ class FormatConverter:
             logger.error(f"Failed to convert {input_path}: {e}")
             raise ValueError(f"Conversion failed: {e}")
 
+    def _parse_channel_names_from_filename(self, filename: str, num_channels: int) -> List[str]:
+        """Extract channel names from Olympus-style filenames.
+        
+        Args:
+            filename: Input filename to parse.
+            num_channels: Expected number of channels.
+            
+        Returns:
+            List of channel names extracted from filename, or generic names if parsing fails.
+        """
+        import re
+        
+        # Pattern to match channel names with optional wavelengths in parentheses
+        # Example: DAPI_ALIX(488)_Phallodin(568)_LAMP1(647)
+        
+        # Common microscopy channel/marker names to look for (order matters - most specific first)
+        known_markers = [
+            'Phalloidin', 'Phallodin',  # Actin (check before other markers)
+            'LAMP1', 'Lamp1',  # Endosomal markers
+            'ALIX', 'CD63', 'TSG101',  # Other endosomal
+            'DAPI', 'Hoechst', 'DRAQ5',  # Nuclear stains
+            'GFP', 'RFP', 'CFP', 'YFP', 'mCherry',  # Fluorescent proteins
+            'Alexa', 'Cy3', 'Cy5',  # Dyes
+        ]
+        
+        found_channels = []
+        found_positions = []
+        found_markers_lower = set()  # Track found markers (case-insensitive)
+        
+        # Try to find known markers in filename (case-insensitive) and track their positions
+        for marker in known_markers:
+            # Skip if we already found this marker (case-insensitive)
+            if marker.lower() in found_markers_lower:
+                continue
+            
+            # Use looser pattern that allows underscores before/after
+            pattern_obj = re.compile(rf'(?:^|_|\s){re.escape(marker)}(?:_|\s|\(|$)', re.IGNORECASE)
+            match = pattern_obj.search(filename)
+            if match:
+                found_channels.append(marker)
+                found_positions.append(match.start())
+                found_markers_lower.add(marker.lower())
+        
+        # Sort by position in filename to maintain order
+        if found_channels and found_positions:
+            sorted_pairs = sorted(zip(found_positions, found_channels))
+            found_channels = [ch for _, ch in sorted_pairs]
+        
+        # If we found the expected number of channels, return them
+        if len(found_channels) == num_channels:
+            logger.info(f"Extracted {len(found_channels)} channel names from filename: {found_channels}")
+            return found_channels
+        
+        # If we found some but not all, pad with generic names
+        if found_channels:
+            while len(found_channels) < num_channels:
+                found_channels.append(f'Channel_{len(found_channels)}')
+            logger.info(f"Partially extracted channel names from filename: {found_channels}")
+            return found_channels[:num_channels]
+        
+        # Fallback: return generic names
+        logger.warning(f"Could not extract channel names from filename: {filename}")
+        return [f'Channel_{i}' for i in range(num_channels)]
+
     def oir_to_ome_tiff(
         self,
         input_path: Union[str, Path],
         output_path: Optional[Union[str, Path]] = None,
         save_metadata: bool = True,
+        strict_validation: bool = True,
+        compression: Optional[str] = 'lzw',
     ) -> Tuple[Path, Dict[str, Any]]:
         """Convert .oir (Olympus) files to .ome.tiff using bioio.
 
@@ -383,6 +449,8 @@ class FormatConverter:
             input_path: Path to the input .oir file.
             output_path: Optional output path for the .ome.tiff result. Defaults to same name with .ome.tiff.
             save_metadata: If True, writes a sidecar JSON with extracted metadata.
+            strict_validation: If True, raises error on missing critical metadata (pixel size). Default: True.
+            compression: Compression method for TIFF ('lzw', 'zstd', None for no compression). Default: 'lzw'.
 
         Returns:
             Tuple of (output_path, metadata_dict).
@@ -390,7 +458,7 @@ class FormatConverter:
         Raises:
             FileNotFoundError: If the input file is missing.
             ImportError: If bioio is not installed.
-            ValueError: If conversion fails.
+            ValueError: If conversion fails or critical metadata missing (when strict_validation=True).
         """
         input_path = Path(input_path)
         if not input_path.exists():
@@ -448,12 +516,30 @@ class FormatConverter:
                 if pixel_size_x and pixel_size_y:
                     pixel_size_um = (pixel_size_x + pixel_size_y) / 2
             
-            # Get channel names
+            # Get channel names from bioio
             if hasattr(img, 'channel_names') and img.channel_names:
                 channel_names = list(img.channel_names)
             
+            # Try to extract additional metadata
+            acquisition_info = {}
+            try:
+                if hasattr(img, 'metadata'):
+                    img_meta = img.metadata
+                    if hasattr(img_meta, 'get'):
+                        # Try to get objective information
+                        if 'objective' in img_meta:
+                            acquisition_info['objective'] = str(img_meta.get('objective'))
+                        if 'magnification' in img_meta:
+                            acquisition_info['magnification'] = img_meta.get('magnification')
+                        if 'numerical_aperture' in img_meta:
+                            acquisition_info['numerical_aperture'] = img_meta.get('numerical_aperture')
+            except Exception as e:
+                logger.debug(f"Could not extract additional metadata: {e}")
+            
             logger.info(f"Extracted pixel size: XY={pixel_size_um} µm, Z={voxel_size_z} µm")
-            logger.info(f"Channel names: {channel_names}")
+            logger.info(f"Channel names from bioio: {channel_names}")
+            if acquisition_info:
+                logger.info(f"Additional metadata: {acquisition_info}")
             
             # Standardize to 4D ZYXC format
             # bioio typically returns TCZYX, we need to handle this
@@ -463,8 +549,17 @@ class FormatConverter:
             z, y, x, c = data.shape
             
             # Update channel names if needed
+            # Check if bioio returned generic/poor quality names
             if not channel_names or len(channel_names) != c:
-                channel_names = [f'Channel_{i}' for i in range(c)]
+                # Try to parse from filename
+                channel_names = self._parse_channel_names_from_filename(input_path.name, c)
+            elif all(name.startswith(('Ch', 'Channel', 'C')) or name.isdigit() for name in channel_names):
+                # bioio returned generic names like "Ch1", "Channel_0", etc.
+                logger.info("bioio returned generic channel names, trying filename parsing...")
+                parsed_names = self._parse_channel_names_from_filename(input_path.name, c)
+                # Use parsed names if they look better than generic ones
+                if any(not name.startswith('Channel_') for name in parsed_names):
+                    channel_names = parsed_names
             
             # Build metadata dictionary with standardized dimensions
             metadata: Dict[str, Any] = {
@@ -489,8 +584,12 @@ class FormatConverter:
                 },
             }
             
-            # Validate colocalization requirements
-            validation = self._validate_colocalization_requirements(data, metadata)
+            # Add acquisition info if available
+            if acquisition_info:
+                metadata['acquisition'] = acquisition_info
+            
+            # Validate colocalization requirements with strict validation
+            validation = self._validate_colocalization_requirements(data, metadata, strict=strict_validation)
             metadata['conversion_validation'] = validation
             
             if validation['warnings']:
@@ -498,7 +597,7 @@ class FormatConverter:
             
             # Save in standardized ZYXC format
             logger.info(f"Saving in standardized ZYXC format: {data.shape}")
-            self._save_as_tiff(data, output_path, metadata)
+            self._save_as_tiff(data, output_path, metadata, compression=compression)
 
             if save_metadata:
                 metadata_path = output_path.with_suffix(".json")
@@ -628,7 +727,8 @@ class FormatConverter:
         self, 
         image_data: np.ndarray, 
         output_path: Path, 
-        metadata: Dict[str, Any]
+        metadata: Dict[str, Any],
+        compression: Optional[str] = 'lzw'
     ) -> None:
         """Save image data as OME-TIFF with metadata.
         
@@ -636,6 +736,7 @@ class FormatConverter:
             image_data: 4D image array with ZYXC axis order.
             output_path: Output file path.
             metadata: Metadata dictionary to embed.
+            compression: Compression method ('lzw', 'zstd', None). Default: 'lzw'.
             
         Raises:
             ValueError: If image_data is not 4D ZYXC format.
@@ -704,7 +805,7 @@ class FormatConverter:
                 bigtiff=use_bigtiff,
                 photometric='minisblack',
                 metadata=ome_metadata,
-                compression='lzw'
+                compression=compression if compression else None
             )
             logger.info(f"Successfully saved OME-TIFF: {output_path}")
         except Exception as e:
@@ -716,7 +817,7 @@ class FormatConverter:
                 bigtiff=use_bigtiff,
                 photometric='minisblack',
                 description=json.dumps(metadata, indent=2, default=str),
-                compression='lzw'
+                compression=compression if compression else None
             )
     
     def _save_metadata_json(self, metadata: Dict[str, Any], output_path: Path) -> None:

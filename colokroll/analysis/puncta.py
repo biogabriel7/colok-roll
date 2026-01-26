@@ -490,17 +490,27 @@ def _detect_spots_bigfish(
     else:
         threshold_scalar = float(threshold)
 
+    # Compute LoG-filtered image for fallback validation
+    sigma = (spot_radius_px, spot_radius_px)
+    image_filtered = bigfish_stack.log_filter(image.astype(np.float64), sigma=sigma)
+    
+    # Compute percentiles of LoG-filtered intensities (only positive values)
+    positive_intensities = image_filtered[image_filtered > 0]
+    if len(positive_intensities) > 0:
+        p95 = float(np.percentile(positive_intensities, 95))
+        p99 = float(np.percentile(positive_intensities, 99))
+    else:
+        p95 = p99 = 0.0
+
     # FALLBACK: If BigFISH couldn't find a valid threshold (returns 0 or very low),
     # apply an SNR-based minimum threshold to prevent detecting noise as spots.
     # This is critical for negative control images where signal is minimal.
     used_fallback = False
+    fallback_reason = None
     original_spot_count = len(spots)
     
     if threshold_scalar <= 0.01 and len(spots) > 0:
-        # Compute SNR-based fallback threshold on LoG-filtered image
-        sigma = (spot_radius_px, spot_radius_px)
-        image_filtered = bigfish_stack.log_filter(image.astype(np.float64), sigma=sigma)
-        
+        # FALLBACK 1: Threshold too LOW
         # Estimate background from LoG-filtered image
         # Use median + MAD for robust estimation
         median_val = float(np.median(image_filtered))
@@ -511,7 +521,7 @@ def _detect_spots_bigfish(
         fallback_threshold = median_val + min_snr_threshold * robust_std
         
         logger.warning(
-            f"BigFISH auto-threshold failed (threshold={threshold_scalar:.4f}, "
+            f"BigFISH auto-threshold TOO LOW (threshold={threshold_scalar:.4f}, "
             f"detected {original_spot_count} spots). "
             f"Applying fallback SNR-based threshold: {fallback_threshold:.2f} "
             f"(median={median_val:.2f}, std={robust_std:.2f}, SNR={min_snr_threshold})"
@@ -527,6 +537,7 @@ def _detect_spots_bigfish(
         )
         threshold_scalar = fallback_threshold
         used_fallback = True
+        fallback_reason = "threshold_too_low"
         
         # If fallback still detects many spots (e.g., >50% of original), 
         # it's likely noise - return 0 spots
@@ -539,9 +550,51 @@ def _detect_spots_bigfish(
                 )
                 spots = np.empty((0, 2), dtype=np.int64)
     
+    elif threshold_scalar > p99 and p99 > 0:
+        # FALLBACK 2: Threshold too HIGH (NEW)
+        # This catches cases where extreme outliers skew the LoG-filtered distribution
+        fallback_threshold = p95
+        
+        logger.warning(
+            f"BigFISH auto-threshold TOO HIGH (threshold={threshold_scalar:.4f} > "
+            f"p99={p99:.4f}, detected {original_spot_count} spots). "
+            f"Elbow detection likely failed due to extreme outliers. "
+            f"Applying percentile-based fallback: {fallback_threshold:.4f} (95th percentile)"
+        )
+        
+        # Re-detect spots with the fallback threshold
+        spots_fallback, _ = bigfish_detection.detect_spots(
+            image.astype(np.float64),
+            threshold=fallback_threshold,
+            return_threshold=True,
+            log_kernel_size=log_kernel_2d,
+            minimum_distance=min_distance_2d,
+        )
+        
+        # Validate: fallback should detect significantly more spots
+        # At least 10x more, or at least 50 spots if original was very low
+        min_expected_increase = max(10, original_spot_count * 10)
+        
+        if len(spots_fallback) >= min_expected_increase or (len(spots_fallback) >= 50 and original_spot_count < 10):
+            logger.info(
+                f"Fallback successful: detected {len(spots_fallback)} spots "
+                f"(vs {original_spot_count} with auto-threshold)"
+            )
+            spots = spots_fallback
+            threshold_scalar = fallback_threshold
+            used_fallback = True
+            fallback_reason = "threshold_too_high"
+        else:
+            logger.warning(
+                f"Fallback validation failed: only detected {len(spots_fallback)} spots "
+                f"(expected >={min_expected_increase}). "
+                f"Keeping original threshold={threshold_scalar:.4f} with {original_spot_count} spots."
+            )
+    
     logger.info(
         f"BigFISH detected {len(spots)} spots with "
         f"{'fallback' if used_fallback else 'auto'}-threshold={threshold_scalar:.2f}"
+        + (f" (reason: {fallback_reason})" if fallback_reason else "")
     )
 
     # Compute elbow curve data if requested
@@ -581,6 +634,12 @@ def _detect_spots_bigfish(
             "spot_counts": spot_counts,
             "local_maxima_count": local_maxima_count,
             "filtered_spots_count": len(spots),
+            "used_fallback": used_fallback,
+            "fallback_reason": fallback_reason,
+            "log_intensity_percentiles": {
+                "p95": p95,
+                "p99": p99,
+            },
         }
 
     # Filter spots to only those within cell mask if provided

@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """
-Test puncta detection pipeline with visualization and colocalization.
+Run puncta detection pipeline on Clorotoxin dataset.
 
-Runs the complete colokroll workflow on all images in a directory:
-1. Load image
-2. Rename channels (LAMP1, Phalloidin, ALIX, DAPI)
-3. Z-slice selection (FFT + Closest k=14)
-4. Background subtraction (automatic per channel) + visualization
-5. Cell segmentation (Cellpose) + visualization
-6. Puncta detection (BigFISH on ALIX)
-7. Colocalization metrics (ALIX vs LAMP1)
-8. Save results
+This script:
+1. Discovers all .nd2 files in the input directory (recursive search)
+2. Auto-converts .nd2 files to .ome.tiff format on-the-fly
+3. Runs the complete puncta detection pipeline on each file
+4. Analyzes Chlorotoxin puncta and colocalization with GM130 (Golgi marker)
+
+Dataset: Clorotoxin
+Channels: GM130, Phalloidin, Chlorotoxin, DAPI
+Z-slice strategy: FFT + Closest (Auto 0.8)
+Folders: 15min, 30min, 60min, ctrl
 
 Usage:
-    python scripts/test_puncta_pipeline.py \
-        --input-dir /path/to/images \
-        --output-dir /path/to/outputs
+    python scripts/test_clorotoxin_pipeline.py \
+        --input-dir /fs/scratch/PAS2598/duarte63/confocal-images/bonetlab/Clorotoxin \
+        --output-dir /fs/scratch/PAS2598/duarte63/outputs/clorotoxin_puncta \
+        --auto-convert
 """
 
 from __future__ import annotations
@@ -43,8 +45,8 @@ logger = logging.getLogger(__name__)
 # Import colokroll
 try:
     import colokroll as cr
-    from colokroll import compute_puncta, plot_puncta_elbow, plot_puncta_detection, compute_colocalization, estimate_min_area_threshold
-    from colokroll.analysis.colocalization import _filter_labels
+    from colokroll import compute_puncta, plot_puncta_elbow, plot_puncta_detection, compute_colocalization
+    from colokroll.core import FormatConverter
 except ImportError as e:
     logger.error(f"Failed to import colokroll: {e}")
     sys.exit(1)
@@ -55,23 +57,171 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 
-# Constants
-CHANNEL_NAMES = ["LAMP1", "Phalloidin", "ALIX", "DAPI"]
-Z_SLICE_STRATEGY = "FFT + Closest (k=14)"
+# Constants - Clorotoxin dataset configuration
+CHANNEL_NAMES = ["GM130", "Phalloidin", "Chlorotoxin", "DAPI"]
+Z_SLICE_STRATEGY = "FFT + Closest (Auto 0.8)"
+
+
+def get_time_point(image_path: Path) -> str:
+    """Extract time point from image path (15min, 30min, 60min, ctrl).
+    
+    Checks both the parent folder name and the filename prefix.
+    """
+    # Check parent folder
+    parent = image_path.parent.name.lower()
+    for tp in ["15min", "30min", "60min", "ctrl"]:
+        if tp in parent:
+            return tp
+    
+    # Check filename prefix (e.g., 15min_1.ome.tiff)
+    stem = image_path.stem.lower()
+    for tp in ["15min", "30min", "60min", "ctrl"]:
+        if stem.startswith(tp):
+            return tp
+    
+    return "unknown"
 
 
 def is_control_image(image_path: Path) -> bool:
-    """Check if image is a control (contains 'ctrl' in filename)."""
-    return "ctrl" in image_path.stem.lower()
+    """Check if image is a control (in 'ctrl' folder or has ctrl prefix)."""
+    return get_time_point(image_path) == "ctrl"
 
 
-def discover_images(input_dir: Path) -> List[Path]:
-    """Discover all ome.tiff images in the input directory."""
-    patterns = ["*.ome.tiff", "*.ome.tif"]
+def get_output_name(image_path: Path) -> str:
+    """Get output folder name with time point prefix (e.g., '15min_1').
+    
+    Ensures unique naming across different time points.
+    """
+    time_point = get_time_point(image_path)
+    base_name = image_path.stem
+    
+    # Remove .ome suffix if present
+    if base_name.endswith(".ome"):
+        base_name = base_name[:-4]
+    
+    # Check if already has time point prefix
+    if base_name.lower().startswith(time_point):
+        return base_name
+    
+    return f"{time_point}_{base_name}"
+
+
+def discover_converted_images(converted_dir: Path) -> List[Path]:
+    """Discover all converted .ome.tiff images in the directory (recursively)."""
+    patterns = ["**/*.ome.tiff", "**/*.ome.tif"]
     images = []
     for pattern in patterns:
-        images.extend(sorted(input_dir.glob(pattern)))
+        images.extend(sorted(converted_dir.glob(pattern)))
+    # Remove duplicates (in case both patterns match same file)
+    images = sorted(set(images))
     return images
+
+
+def discover_nd2_files(input_dir: Path) -> List[Path]:
+    """Discover all ND2 files in the directory (recursively)."""
+    patterns = ["**/*.nd2", "**/*.oir"]
+    files = []
+    for pattern in patterns:
+        files.extend(sorted(input_dir.glob(pattern)))
+    return sorted(set(files))
+
+
+def convert_missing_files(
+    input_files: List[Path],
+    converted_dir: Path,
+    max_files: Optional[int] = None
+) -> List[Path]:
+    """Convert ND2/OIR files that haven't been converted yet.
+    
+    Args:
+        input_files: List of ND2/OIR file paths to check/convert
+        converted_dir: Directory where converted files should be saved
+        max_files: Maximum number of files to convert (None = all)
+        
+    Returns:
+        List of paths to converted OME-TIFF files
+    """
+    converted_dir.mkdir(parents=True, exist_ok=True)
+    converter = FormatConverter()
+    converted_files = []
+    
+    # Limit files if specified
+    files_to_convert = input_files[:max_files] if max_files else input_files
+    
+    for input_file in files_to_convert:
+        # Get time point prefix for unique naming
+        time_point = get_time_point(input_file)
+        base_name = input_file.stem
+        output_name = f"{time_point}_{base_name}.ome.tiff"
+        
+        # Check if already converted
+        expected_output = converted_dir / output_name
+        if expected_output.exists():
+            logger.info(f"Already converted: {input_file.name} -> {output_name}")
+            converted_files.append(expected_output)
+            continue
+        
+        # Convert the file based on extension
+        try:
+            logger.info(f"Converting: {input_file.name} -> {output_name}...")
+            file_ext = input_file.suffix.lower()
+            
+            if file_ext == '.nd2':
+                converted_path, metadata = converter.nd2_to_ome_tiff(
+                    input_file,
+                    expected_output,
+                    save_metadata=True
+                )
+            elif file_ext == '.oir':
+                converted_path, metadata = converter.oir_to_ome_tiff(
+                    input_file,
+                    expected_output,
+                    save_metadata=True
+                )
+            else:
+                logger.warning(f"  Unsupported file type: {file_ext}, skipping {input_file.name}")
+                continue
+            
+            converted_files.append(converted_path)
+            logger.info(f"  Converted to: {converted_path.name}")
+        except ImportError as e:
+            logger.warning(f"  Conversion not available (missing dependency): {e}")
+            logger.warning(f"  Skipping {input_file.name}")
+        except Exception as e:
+            logger.error(f"  Failed to convert {input_file.name}: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    return converted_files
+
+
+def is_already_processed(image_path: Path, output_dir: Path) -> bool:
+    """Check if an image has already been processed.
+    
+    Args:
+        image_path: Path to the input image
+        output_dir: Root output directory
+        
+    Returns:
+        True if the image appears to have been processed (has output directory with key files)
+    """
+    output_name = get_output_name(image_path)
+    image_output_dir = output_dir / output_name
+    
+    # Check if output directory exists
+    if not image_output_dir.exists():
+        return False
+    
+    # Check for key output files that indicate successful processing
+    key_files = [
+        image_output_dir / "puncta" / "metrics.json",
+        image_output_dir / "colocalization" / "metrics.json",
+        image_output_dir / "segmentation" / f"{output_name}_masks.tif",
+    ]
+    
+    # If at least 2 out of 3 key files exist, consider it processed
+    existing_files = sum(1 for f in key_files if f.exists())
+    return existing_files >= 2
 
 
 def run_pipeline(
@@ -82,22 +232,26 @@ def run_pipeline(
     Run the complete puncta detection pipeline on a single image.
     
     Args:
-        image_path: Path to input image
+        image_path: Path to input image (OME-TIFF)
         output_dir: Directory for outputs
         
     Returns:
         Dictionary with pipeline results and metrics
     """
-    image_name = image_path.stem
+    # Use output name with time point prefix (e.g., "15min_1")
+    output_name = get_output_name(image_path)
+    image_name = output_name  # Used for result dict and file naming
+    time_point = get_time_point(image_path)
     is_ctrl = is_control_image(image_path)
     
     logger.info("=" * 60)
-    logger.info(f"Processing: {image_name}")
+    logger.info(f"Processing: {output_name} (from {image_path.name})")
+    logger.info(f"Time point: {time_point}")
     logger.info(f"Control image: {is_ctrl}")
     logger.info("=" * 60)
     
     # Create output directories
-    image_output_dir = output_dir / image_name
+    image_output_dir = output_dir / output_name
     bg_output_dir = image_output_dir / "background"
     seg_output_dir = image_output_dir / "segmentation"
     puncta_output_dir = image_output_dir / "puncta"
@@ -110,9 +264,11 @@ def run_pipeline(
     result = {
         "image_name": image_name,
         "image_path": str(image_path),
+        "time_point": time_point,
         "is_control": is_ctrl,
         "success": False,
         "error": None,
+        "pixel_size_um": None,
         "z_slices_original": None,
         "z_slices_kept": None,
         "cell_count": None,
@@ -142,8 +298,16 @@ def run_pipeline(
         result["z_slices_original"] = image.shape[0]
         logger.info(f"  Loaded image with shape: {image.shape}")
         
+        # Get pixel size for puncta detection
+        pixel_size_um = loader.get_pixel_size()
+        result["pixel_size_um"] = pixel_size_um
+        if pixel_size_um:
+            logger.info(f"  Pixel size: {pixel_size_um:.4f} µm")
+        else:
+            logger.warning("  No pixel size found in metadata, using defaults")
+        
         # =====================================================================
-        # Step 2: Rename channels
+        # Step 2: Rename channels (Clorotoxin dataset)
         # =====================================================================
         logger.info("Step 2: Renaming channels...")
         loader.rename_channels(CHANNEL_NAMES)
@@ -151,7 +315,7 @@ def run_pipeline(
         logger.info(f"  Channels: {channel_names}")
         
         # =====================================================================
-        # Step 3: Z-slice selection
+        # Step 3: Z-slice selection (FFT + Closest Auto 0.8)
         # =====================================================================
         logger.info("Step 3: Z-slice selection...")
         comparison = cr.compare_strategies(
@@ -185,13 +349,14 @@ def run_pipeline(
             ch_data = filtered_image[:, :, :, i]
             t0 = time.perf_counter()
             
-            # Use is_negative_control for ALIX on control images
-            use_negative_control = (ch == "ALIX" and is_ctrl)
+            # Use is_negative_control for Chlorotoxin on control images
+            use_negative_control = (ch == "Chlorotoxin" and is_ctrl)
             
             corrected, meta = bg_subtractor.subtract_background(
                 image=ch_data,
                 channel_name=ch,
                 is_negative_control=use_negative_control,
+                auto_cache_score_tolerance=0.20,  # Higher tolerance to avoid exhaustive search
             )
             
             # Sync GPU
@@ -219,7 +384,7 @@ def run_pipeline(
             logger.warning(f"  Could not save background plot: {e}")
         
         # =====================================================================
-        # Step 5: Cell segmentation
+        # Step 5: Cell segmentation (Phalloidin + DAPI)
         # =====================================================================
         logger.info("Step 5: Cell segmentation...")
         segmenter = cr.CellSegmenter(
@@ -230,71 +395,57 @@ def run_pipeline(
         
         seg = segmenter.segment_from_results(
             results=bg_results,
-            channel_a="GM130",
-            channel_b="DAPI",a
-            channel_weights=(1.0, 0.10),
+            channel_a="Chlorotoxin",
+            channel_b="Chlorotoxin",
+            channel_weights=(1.0, 0.0),
             projection="mip",
             output_format="png8",
             save_basename=image_name,
         )
         
-        # Count cells before filtering
-        unique_labels = np.unique(seg.mask_array)
-        cell_count_raw = len(unique_labels) - 1  # Exclude background (0)
-        logger.info(f"  Segmented {cell_count_raw} cells (before filtering)")
+        # Count cells (use raw mask without filtering)
+        mask_2d = seg.mask_array.copy()
+        
+        # Remove label 1 (Cellpose background artifact) if present
+        if np.any(mask_2d == 1):
+            mask_2d[mask_2d == 1] = 0
+            logger.info("  Removed label 1 (Cellpose background artifact)")
+        
+        unique_labels = np.unique(mask_2d)
+        cell_count = len(unique_labels) - 1  # Exclude background (0)
+        result["cell_count"] = cell_count
+        logger.info(f"  Segmented {cell_count} cells")
         logger.info(f"  Mask saved: {seg.mask_path}")
+        
+        # Save mask copy for analysis
+        from tifffile import imwrite
+        mask_path = seg_output_dir / f"{image_name}_masks.tif"
+        imwrite(str(mask_path), mask_2d.astype(np.uint16))
+        logger.info(f"  Saved analysis mask: {mask_path}")
         
         # Save segmentation overlay if outlines available
         if seg.outlines_path and Path(seg.outlines_path).exists():
             logger.info(f"  Outlines saved: {seg.outlines_path}")
         
         # =====================================================================
-        # Step 5b: Filter cells (same as colocalization)
+        # Step 6: Puncta detection on Chlorotoxin channel
         # =====================================================================
-        logger.info("Step 5b: Filtering cells (min_area=auto, max_border_fraction=0.20)...")
+        logger.info("Step 6: Puncta detection (Chlorotoxin channel)...")
         
-        # Load mask and apply same filtering as colocalization
-        mask_2d = seg.mask_array.copy()
-        
-        # Remove label 1 (Cellpose background) if present
-        if np.any(mask_2d == 1):
-            mask_2d[mask_2d == 1] = 0
-            logger.info("  Removed label 1 (Cellpose background)")
-        
-        # Estimate min_area threshold (90% of median cell area)
-        min_area = estimate_min_area_threshold(mask_2d, fraction_of_median=0.90)
-        logger.info(f"  Auto min_area threshold: {min_area} (90% of median)")
-        
-        # Apply filtering
-        filtered_mask, filter_info = _filter_labels(
-            mask_2d,
-            min_area=min_area,
-            max_border_fraction=0.20,
-            border_margin_px=1,
-        )
-        
-        # Save filtered mask
-        filtered_mask_path = seg_output_dir / f"{image_name}_masks_filtered.tif"
-        from tifffile import imwrite
-        imwrite(str(filtered_mask_path), filtered_mask.astype(np.uint16))
-        logger.info(f"  Saved filtered mask: {filtered_mask_path}")
-        
-        # Update cell count after filtering
-        cell_count = len(filter_info["kept_labels"])
-        result["cell_count"] = cell_count
-        logger.info(f"  Cells after filtering: {cell_count} (removed {len(filter_info['removed_labels'])})")
-        
-        # =====================================================================
-        # Step 6: Puncta detection (using filtered mask)
-        # =====================================================================
-        logger.info("Step 6: Puncta detection...")
+        # Chlorotoxin puncta are very small - using minimal diameter parameters
+        # and lower SNR threshold for more sensitive detection
         puncta_result = compute_puncta(
             bg_results,
-            filtered_mask,  # Use filtered mask instead of original
-            channel="ALIX",
+            mask_2d,  # Use raw mask (label 1 already removed)
+            channel="Chlorotoxin",
             detection_method="bigfish",
+            pixel_size_um=pixel_size_um,
+            expected_diameter_um=0.2,  # smaller?
+            min_diameter_um=0.05,
+            max_diameter_um=0.8,
+            snr_threshold=2.0,  # Lower SNR thr
             return_threshold_data=True,
-            drop_label_1=False,  # Already removed during filtering
+            drop_label_1=False,
         )
         
         # Extract metrics from puncta_result structure
@@ -356,17 +507,17 @@ def run_pipeline(
         
         # Save puncta detection visualization
         try:
-            # Get MIP of ALIX channel for visualization
-            alix_data = bg_results["ALIX"][0]
-            alix_mip = np.max(alix_data, axis=0)
+            # Get MIP of Chlorotoxin channel for visualization
+            chlorotoxin_data = bg_results["Chlorotoxin"][0]
+            chlorotoxin_mip = np.max(chlorotoxin_data, axis=0)
             
             # Create detection overlay visualization
             fig = plot_puncta_detection(
                 puncta_result,
-                alix_mip,
-                cell_mask=filtered_mask,
+                chlorotoxin_mip,
+                cell_mask=mask_2d,
                 figsize=(15, 5),
-                title=f"Puncta Detection - {image_name} (ALIX)",
+                title=f"Puncta Detection - {image_name} (Chlorotoxin)",
             )
             detection_overlay_path = puncta_output_dir / "detection_overlay.png"
             fig.savefig(detection_overlay_path, dpi=150, bbox_inches="tight")
@@ -376,9 +527,9 @@ def run_pipeline(
             logger.warning(f"  Could not save detection overlay: {e}")
         
         # =====================================================================
-        # Step 7: Colocalization (ALIX vs LAMP1) - Both Otsu and Costes
+        # Step 7: Colocalization (Chlorotoxin vs GM130) - Both Otsu and Costes
         # =====================================================================
-        logger.info("Step 7: Colocalization analysis (ALIX vs LAMP1)...")
+        logger.info("Step 7: Colocalization analysis (Chlorotoxin vs GM130)...")
         
         # Reconstruct 4D array from results
         corrected_stack = np.stack([
@@ -386,26 +537,26 @@ def run_pipeline(
             for ch in channel_names
         ], axis=-1)
         
-        # Use different min_threshold_sigma: 3.0 for control (strict), 2.0 for treatment (more inclusive)
+        # Use different min_threshold_sigma: 2.0 for control (strict), 3.0 for treatment (more inclusive)
         min_sigma = 2.0 if is_ctrl else 3.0
         logger.info(f"  Using min_threshold_sigma={min_sigma} ({'control - strict' if is_ctrl else 'treatment - inclusive'})")
         
         # Path for mask visualization
-        coloc_mask_plot_path = coloc_output_dir / "mask_filtered.png"
+        coloc_mask_plot_path = coloc_output_dir / "mask.png"
         
         # Common parameters for both thresholding methods
-        # Use the same filtered mask as puncta detection
+        # Use raw mask (no cell size/border filtering)
         common_params = dict(
             image=corrected_stack,
-            mask=filtered_mask,  # Use pre-filtered mask (same as puncta)
-            channel_a="ALIX",
-            channel_b="LAMP1",
+            mask=mask_2d,  # Use raw mask (no filtering)
+            channel_a="Chlorotoxin",
+            channel_b="GM130",
             channel_names=channel_names,
             pearson_winsor_clip=0.1,
             min_threshold_sigma=min_sigma,
-            min_area=0,  # Already filtered
-            max_border_fraction=None,  # Already filtered
-            drop_label_1=False,  # Already removed during filtering
+            min_area=0,  # No area filtering
+            max_border_fraction=None,  # No border filtering
+            drop_label_1=False,  # Already removed above
         )
         
         try:
@@ -452,8 +603,8 @@ def run_pipeline(
             coloc_metrics = {
                 "image_name": image_name,
                 "is_control": is_ctrl,
-                "channel_a": "ALIX",
-                "channel_b": "LAMP1",
+                "channel_a": "Chlorotoxin",
+                "channel_b": "GM130",
                 "min_threshold_sigma": min_sigma,
                 "pearson_r": result["pearson_r"],
                 "manders_m1_otsu": result["manders_m1_otsu"],
@@ -503,8 +654,10 @@ def save_summary_csv(results: List[Dict[str, Any]], output_path: Path) -> None:
     
     columns = [
         "image_name",
+        "time_point",
         "is_control",
         "success",
+        "pixel_size_um",
         "z_slices_original",
         "z_slices_kept",
         "cell_count",
@@ -534,19 +687,30 @@ def save_summary_csv(results: List[Dict[str, Any]], output_path: Path) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Test puncta detection pipeline on all images in a directory"
+        description="Run puncta detection pipeline on Clorotoxin dataset"
     )
     parser.add_argument(
         "--input-dir",
         type=Path,
         required=True,
-        help="Directory containing input ome.tiff images",
+        help="Directory containing input .nd2 files (searches recursively across 15min, 30min, 60min, ctrl folders)",
+    )
+    parser.add_argument(
+        "--auto-convert",
+        action="store_true",
+        help="Automatically convert ND2 files to OME-TIFF format",
+    )
+    parser.add_argument(
+        "--max-convert",
+        type=int,
+        default=None,
+        help="Maximum number of files to convert (None = all). Useful for testing.",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         required=True,
-        help="Directory for output files",
+        help="Directory for output files (new folder structure will be created)",
     )
     parser.add_argument(
         "--log-level",
@@ -561,33 +725,119 @@ def main():
     # Set log level
     logging.getLogger().setLevel(getattr(logging, args.log_level))
     
-    # Auto-discover all ome.tiff images
-    images = discover_images(args.input_dir)
+    # Create temporary conversion directory within output directory
+    converted_dir = args.output_dir / "converted_files"
+    converted_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Discover images (both .nd2 and already converted .ome.tiff)
+    images = []
+    
+    # First, look for already converted .ome.tiff files
+    existing_converted = discover_converted_images(converted_dir)
+    images.extend(existing_converted)
+    logger.info(f"Found {len(existing_converted)} already converted OME-TIFF files")
+    
+    # Auto-convert .nd2 files if requested
+    if args.auto_convert:
+        logger.info("")
+        logger.info("Discovering and converting ND2 files...")
+        nd2_files = discover_nd2_files(args.input_dir)
+        logger.info(f"Found {len(nd2_files)} ND2 files in input directory")
+        
+        if nd2_files:
+            converted_new = convert_missing_files(
+                nd2_files,
+                converted_dir,
+                max_files=args.max_convert
+            )
+            # Add newly converted files to the images list
+            existing_paths = {img for img in images}
+            for new_img in converted_new:
+                if new_img not in existing_paths:
+                    images.append(new_img)
+            images = sorted(set(images))
+            logger.info(f"Total images available: {len(images)}")
     
     if not images:
-        logger.error(f"No ome.tiff images found in {args.input_dir}")
+        logger.error(f"No .ome.tiff images found")
+        if not args.auto_convert:
+            logger.error("  Try running with --auto-convert to automatically convert ND2 files")
+        else:
+            logger.error("  No files were converted. Check that ND2 files exist in the input directory.")
         sys.exit(1)
     
+    # Group images by parent directory for better logging
+    images_by_folder = {}
+    for img in images:
+        parent = img.parent.name if img.parent != converted_dir else "root"
+        if parent not in images_by_folder:
+            images_by_folder[parent] = []
+        images_by_folder[parent].append(img)
+    
     logger.info("=" * 60)
-    logger.info("Puncta Detection Pipeline - Full Batch Test")
+    logger.info("Clorotoxin Puncta Detection Pipeline")
     logger.info("=" * 60)
     logger.info(f"Input directory: {args.input_dir}")
     logger.info(f"Output directory: {args.output_dir}")
     logger.info(f"Discovered {len(images)} images:")
-    for img in images:
-        ctrl_tag = " (control)" if is_control_image(img) else ""
-        logger.info(f"  - {img.name}{ctrl_tag}")
+    for folder, folder_images in sorted(images_by_folder.items()):
+        # Determine time point from folder name
+        time_point = "unknown"
+        if folder != "root":
+            # Extract time point info from parent folder in original nd2 path
+            for img in folder_images:
+                # Try to infer from the original location
+                if "15min" in str(img.parent):
+                    time_point = "15min"
+                elif "30min" in str(img.parent):
+                    time_point = "30min"
+                elif "60min" in str(img.parent):
+                    time_point = "60min"
+                elif "ctrl" in str(img.parent):
+                    time_point = "ctrl"
+                break
+        
+        logger.info(f"  {folder}/ ({len(folder_images)} images, {time_point}):")
+        for img in folder_images[:3]:  # Show first 3
+            ctrl_tag = " (control)" if is_control_image(img) else ""
+            logger.info(f"    - {img.name}{ctrl_tag}")
+        if len(folder_images) > 3:
+            logger.info(f"    ... and {len(folder_images) - 3} more")
+    
     logger.info(f"Channel names: {CHANNEL_NAMES}")
     logger.info(f"Z-slice strategy: {Z_SLICE_STRATEGY}")
+    logger.info(f"Puncta channel: Chlorotoxin")
+    logger.info(f"Colocalization: Chlorotoxin vs GM130")
     logger.info("=" * 60)
     
     # Create output directory
     args.output_dir.mkdir(parents=True, exist_ok=True)
     
+    # Filter out already processed images
+    images_to_process = []
+    images_skipped = []
+    
+    for image_path in images:
+        if is_already_processed(image_path, args.output_dir):
+            images_skipped.append(image_path)
+            logger.info(f"Skipping {image_path.name} (already processed)")
+        else:
+            images_to_process.append(image_path)
+    
+    if images_skipped:
+        logger.info(f"Skipped {len(images_skipped)} already processed image(s)")
+    
+    if not images_to_process:
+        logger.warning("All images have already been processed!")
+        sys.exit(0)
+    
+    logger.info(f"Processing {len(images_to_process)} image(s)...")
+    logger.info("")
+    
     # Process each image
     all_results = []
     
-    for image_path in images:
+    for image_path in images_to_process:
         result = run_pipeline(image_path, args.output_dir)
         all_results.append(result)
     
@@ -601,6 +851,15 @@ def main():
     logger.info("SUMMARY")
     logger.info("=" * 60)
     
+    # Show skipped images
+    if images_skipped:
+        logger.info(f"Skipped {len(images_skipped)} already processed image(s):")
+        for img in images_skipped:
+            ctrl_tag = " (control)" if is_control_image(img) else ""
+            logger.info(f"  ⊘ {img.stem}{ctrl_tag}")
+        logger.info("")
+    
+    # Show processed images
     for r in all_results:
         status = "✓" if r.get("success") else "✗"
         puncta = r.get("puncta_count", "N/A")
@@ -616,8 +875,11 @@ def main():
     # Count successes/failures
     n_success = sum(1 for r in all_results if r.get("success"))
     n_total = len(all_results)
+    n_skipped = len(images_skipped)
     logger.info("")
-    logger.info(f"Completed: {n_success}/{n_total} images processed successfully")
+    logger.info(f"Processed: {n_success}/{n_total} images successfully")
+    if n_skipped > 0:
+        logger.info(f"Skipped: {n_skipped} already processed image(s)")
     logger.info(f"Results saved to: {args.output_dir}")
 
 

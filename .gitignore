@@ -72,3 +72,5 @@ test_fix_morphological_size.py
 strategy_qc/
 strategy_comparison/comparison_summary.txt
 job_monitor.log
+INVESTIGATION_SUMMARY.md
+OIR_CONVERTER_TEST_SUMMARY.md

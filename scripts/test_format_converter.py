@@ -166,6 +166,19 @@ def test_nd2_conversion(
         checks['z_levels_match'] = loaded_data.shape[0] == z_levels
         checks['z_levels'] = loaded_data.shape[0]
         
+        # 9. Check pixel size is reasonable (typical confocal: 0.01-10.0 µm)
+        if original_pixel_size is not None:
+            checks['pixel_size_reasonable'] = 0.01 <= original_pixel_size <= 10.0
+            checks['pixel_size_value'] = original_pixel_size
+        else:
+            checks['pixel_size_reasonable'] = False
+        
+        # 10. Check channel name quality (not all generic)
+        if original_channels:
+            generic_count = sum(1 for ch in original_channels if ch.startswith(('Channel_', 'Ch', 'C')) or ch.isdigit())
+            checks['channel_names_quality'] = 'good' if generic_count < len(original_channels) else 'generic'
+            checks['generic_channel_count'] = generic_count
+        
         # Overall success
         critical_checks = [
             'file_created',
@@ -243,17 +256,62 @@ def test_oir_conversion(
             original_pixel_size is not None and
             abs(loaded_pixel_size - original_pixel_size) < 0.001
         )
+        checks['pixel_size_original'] = original_pixel_size
+        checks['pixel_size_loaded'] = loaded_pixel_size
+        
+        # Check channel names
+        loaded_channels = loader.get_channel_names()
+        original_channels = metadata.get('channel_names', [])
+        checks['channels_preserved'] = (
+            len(loaded_channels) == len(original_channels) and
+            loaded_channels == original_channels
+        )
+        checks['channel_names_original'] = original_channels
+        checks['channel_names_loaded'] = loaded_channels
         
         with tifffile.TiffFile(str(converted_path)) as tif:
             has_ome = hasattr(tif, 'ome_metadata') and tif.ome_metadata is not None
             checks['ome_xml_present'] = has_ome
+            
+            if has_ome:
+                ome_xml = tif.ome_metadata
+                checks['has_physical_size_x'] = 'PhysicalSizeX' in ome_xml
+                checks['has_physical_size_y'] = 'PhysicalSizeY' in ome_xml
+                checks['has_channels'] = 'Channel' in ome_xml
+        
+        # Check dtype
+        checks['dtype'] = str(loaded_data.dtype)
+        checks['dtype_valid'] = loaded_data.dtype in [np.uint8, np.uint16, np.float32, np.float64]
+        
+        # Check pixel size is reasonable
+        if original_pixel_size is not None:
+            checks['pixel_size_reasonable'] = 0.01 <= original_pixel_size <= 10.0
+            checks['pixel_size_value'] = original_pixel_size
+        else:
+            checks['pixel_size_reasonable'] = False
+        
+        # Check channel name quality
+        if original_channels:
+            generic_count = sum(1 for ch in original_channels if ch.startswith(('Channel_', 'Ch', 'C')) or ch.isdigit())
+            checks['channel_names_quality'] = 'good' if generic_count < len(original_channels) else 'generic'
+            checks['generic_channel_count'] = generic_count
+        
+        # Z-stack integrity
+        z_levels = metadata.get('dimensions', {}).get('z_levels', 1)
+        checks['z_levels_match'] = loaded_data.shape[0] == z_levels
+        checks['z_levels'] = loaded_data.shape[0]
         
         result['checks'] = checks
-        result['success'] = all([
-            checks.get('file_created', False),
-            checks.get('dimensions_4d', False),
-            checks.get('ome_xml_present', False),
-        ])
+        
+        # Critical checks for OIR conversion
+        critical_checks = [
+            'file_created',
+            'dimensions_4d',
+            'ome_xml_present',
+            'pixel_size_preserved',
+            'pixel_size_reasonable',
+        ]
+        result['success'] = all(checks.get(c, False) for c in critical_checks)
         
     except ImportError as e:
         logger.warning(f"OIR conversion skipped (missing bioio): {e}")

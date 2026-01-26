@@ -59,14 +59,30 @@ AUTO_BG_CONFIG: Dict[str, Dict[str, Any]] = {
 
     # Nuclear stain: large rolling ball to avoid halos
     "DAPI": {
-        "grid": {"rolling_ball": {"radius": [100, 110, 120, 130, 140], "light_background": [False]}},
+        "default": {"method": "gaussian", "sigma": 275.0},
+        "force_default": True,
+        "grid": {"gaussian": {"sigma": [250, 275, 300]}},
         "weights": {"w_bg": 0.5, "w_contrast": 0.3, "w_grad": 0.2, "w_zero": 0.3},
-        "explanation": "Large rolling ball reduces nuclear background and halo artifacts.",
+        "explanation": "Large gaussian for nuclear background removal.",
     },
-        #"You_add_more_channels_here": {
-        #"grid": {"rolling_ball": {"radius": [100, 110, 120, 130, 140], "light_background": [False]}},
-        #"weights": {"w_bg": 0.5, "w_contrast": 0.3, "w_grad": 0.2, "w_zero": 0.3},
-        #"explanation": "Explanation for the channel.",
+
+    # Golgi marker (GM130): 3D Gaussian background subtraction
+    "GM130": {
+        "default": {"method": "gaussian", "sigma": 378.125},
+        "force_default": True,
+        "grid": {"gaussian": {"sigma": [350, 378.125, 400]}},
+        "weights": {"w_bg": 0.5, "w_contrast": 0.3, "w_grad": 0.2, "w_zero": 0.3},
+        "explanation": "Gaussian background subtraction for Golgi marker, optimized from cache.",
+    },
+
+    # Chlorotoxin channel: 3D Gaussian background subtraction
+    "Chlorotoxin": {
+        "default": {"method": "gaussian", "sigma": 378.125},
+        "force_default": True,
+        "grid": {"gaussian": {"sigma": [350, 378.125, 400]}},
+        "weights": {"w_bg": 0.5, "w_contrast": 0.3, "w_grad": 0.2, "w_zero": 0.3},
+        "explanation": "Gaussian background subtraction for Chlorotoxin puncta, optimized from cache.",
+    },
 }
 
 

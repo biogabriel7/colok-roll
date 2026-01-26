@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
 """
-Test puncta detection pipeline with visualization and colocalization.
+Run puncta detection pipeline on all converted OME-TIFF files from format converter test.
 
-Runs the complete colokroll workflow on all images in a directory:
-1. Load image
-2. Rename channels (LAMP1, Phalloidin, ALIX, DAPI)
-3. Z-slice selection (FFT + Closest k=14)
-4. Background subtraction (automatic per channel) + visualization
-5. Cell segmentation (Cellpose) + visualization
-6. Puncta detection (BigFISH on ALIX)
-7. Colocalization metrics (ALIX vs LAMP1)
-8. Save results
+This script:
+1. Discovers all .ome.tiff files in the format converter output directory
+2. Runs the complete puncta detection pipeline on each file
+3. Uses the same methods and channel order as test_puncta_pipeline.py
+4. Creates a new folder structure for the output
 
 Usage:
-    python scripts/test_puncta_pipeline.py \
-        --input-dir /path/to/images \
-        --output-dir /path/to/outputs
+    python scripts/run_puncta_on_converted.py \
+        --converted-dir /path/to/format_converter/output \
+        --output-dir /path/to/puncta/outputs
 """
 
 from __future__ import annotations
@@ -45,6 +41,7 @@ try:
     import colokroll as cr
     from colokroll import compute_puncta, plot_puncta_elbow, plot_puncta_detection, compute_colocalization, estimate_min_area_threshold
     from colokroll.analysis.colocalization import _filter_labels
+    from colokroll.core import FormatConverter
 except ImportError as e:
     logger.error(f"Failed to import colokroll: {e}")
     sys.exit(1)
@@ -55,7 +52,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 
-# Constants
+# Constants - same as test_puncta_pipeline.py
 CHANNEL_NAMES = ["LAMP1", "Phalloidin", "ALIX", "DAPI"]
 Z_SLICE_STRATEGY = "FFT + Closest (k=14)"
 
@@ -65,13 +62,117 @@ def is_control_image(image_path: Path) -> bool:
     return "ctrl" in image_path.stem.lower()
 
 
-def discover_images(input_dir: Path) -> List[Path]:
-    """Discover all ome.tiff images in the input directory."""
-    patterns = ["*.ome.tiff", "*.ome.tif"]
+def discover_converted_images(converted_dir: Path) -> List[Path]:
+    """Discover all converted .ome.tiff images in the directory (recursively)."""
+    patterns = ["**/*.ome.tiff", "**/*.ome.tif"]
     images = []
     for pattern in patterns:
-        images.extend(sorted(input_dir.glob(pattern)))
+        images.extend(sorted(converted_dir.glob(pattern)))
+    # Remove duplicates (in case both patterns match same file)
+    images = sorted(set(images))
     return images
+
+
+def discover_nd2_files(input_dir: Path) -> List[Path]:
+    """Discover all ND2 files in the directory (recursively)."""
+    patterns = ["**/*.nd2", "**/*.oir"]
+    files = []
+    for pattern in patterns:
+        files.extend(sorted(input_dir.glob(pattern)))
+    return sorted(set(files))
+
+
+def convert_missing_files(
+    input_files: List[Path],
+    converted_dir: Path,
+    max_files: Optional[int] = None
+) -> List[Path]:
+    """Convert ND2/OIR files that haven't been converted yet.
+    
+    Args:
+        input_files: List of ND2/OIR file paths to check/convert
+        converted_dir: Directory where converted files should be saved
+        max_files: Maximum number of files to convert (None = all)
+        
+    Returns:
+        List of paths to converted OME-TIFF files
+    """
+    converted_dir.mkdir(parents=True, exist_ok=True)
+    converter = FormatConverter()
+    converted_files = []
+    
+    # Limit files if specified
+    files_to_convert = input_files[:max_files] if max_files else input_files
+    
+    for input_file in files_to_convert:
+        # Check if already converted
+        expected_output = converted_dir / input_file.with_suffix('.ome.tiff').name
+        if expected_output.exists():
+            logger.info(f"Already converted: {input_file.name}")
+            converted_files.append(expected_output)
+            continue
+        
+        # Convert the file based on extension
+        try:
+            logger.info(f"Converting: {input_file.name}...")
+            file_ext = input_file.suffix.lower()
+            
+            if file_ext == '.nd2':
+                converted_path, metadata = converter.nd2_to_ome_tiff(
+                    input_file,
+                    expected_output,
+                    save_metadata=True
+                )
+            elif file_ext == '.oir':
+                converted_path, metadata = converter.oir_to_ome_tiff(
+                    input_file,
+                    expected_output,
+                    save_metadata=True
+                )
+            else:
+                logger.warning(f"  Unsupported file type: {file_ext}, skipping {input_file.name}")
+                continue
+            
+            converted_files.append(converted_path)
+            logger.info(f"  Converted to: {converted_path.name}")
+        except ImportError as e:
+            logger.warning(f"  Conversion not available (missing dependency): {e}")
+            logger.warning(f"  Skipping {input_file.name}")
+        except Exception as e:
+            logger.error(f"  Failed to convert {input_file.name}: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    return converted_files
+
+
+def is_already_processed(image_path: Path, output_dir: Path) -> bool:
+    """Check if an image has already been processed.
+    
+    Args:
+        image_path: Path to the input image
+        output_dir: Root output directory
+        
+    Returns:
+        True if the image appears to have been processed (has output directory with key files)
+    """
+    image_name = image_path.stem
+    image_output_dir = output_dir / image_name
+    
+    # Check if output directory exists
+    if not image_output_dir.exists():
+        return False
+    
+    # Check for key output files that indicate successful processing
+    key_files = [
+        image_output_dir / "puncta" / "metrics.json",
+        image_output_dir / "colocalization" / "metrics.json",
+        image_output_dir / "segmentation" / f"{image_name}_masks_filtered.tif",
+    ]
+    
+    # If at least 2 out of 3 key files exist, consider it processed
+    existing_files = sum(1 for f in key_files if f.exists())
+    return existing_files >= 2
 
 
 def run_pipeline(
@@ -82,7 +183,7 @@ def run_pipeline(
     Run the complete puncta detection pipeline on a single image.
     
     Args:
-        image_path: Path to input image
+        image_path: Path to input image (OME-TIFF)
         output_dir: Directory for outputs
         
     Returns:
@@ -143,7 +244,7 @@ def run_pipeline(
         logger.info(f"  Loaded image with shape: {image.shape}")
         
         # =====================================================================
-        # Step 2: Rename channels
+        # Step 2: Rename channels (same order as test_puncta_pipeline.py)
         # =====================================================================
         logger.info("Step 2: Renaming channels...")
         loader.rename_channels(CHANNEL_NAMES)
@@ -151,7 +252,7 @@ def run_pipeline(
         logger.info(f"  Channels: {channel_names}")
         
         # =====================================================================
-        # Step 3: Z-slice selection
+        # Step 3: Z-slice selection (same method as test_puncta_pipeline.py)
         # =====================================================================
         logger.info("Step 3: Z-slice selection...")
         comparison = cr.compare_strategies(
@@ -230,8 +331,8 @@ def run_pipeline(
         
         seg = segmenter.segment_from_results(
             results=bg_results,
-            channel_a="GM130",
-            channel_b="DAPI",a
+            channel_a="Phalloidin",
+            channel_b="DAPI",
             channel_weights=(1.0, 0.10),
             projection="mip",
             output_format="png8",
@@ -534,19 +635,36 @@ def save_summary_csv(results: List[Dict[str, Any]], output_path: Path) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Test puncta detection pipeline on all images in a directory"
+        description="Run puncta detection pipeline on all converted OME-TIFF files"
     )
     parser.add_argument(
-        "--input-dir",
+        "--converted-dir",
         type=Path,
         required=True,
-        help="Directory containing input ome.tiff images",
+        help="Directory containing converted .ome.tiff files (from format converter)",
+    )
+    parser.add_argument(
+        "--original-input-dir",
+        type=Path,
+        default=None,
+        help="Original input directory with folder structure (15min, 30min, 60min, ctrl). If provided, will convert missing ND2/OIR files automatically.",
+    )
+    parser.add_argument(
+        "--auto-convert",
+        action="store_true",
+        help="Automatically convert ND2/OIR files that haven't been converted yet",
+    )
+    parser.add_argument(
+        "--max-convert",
+        type=int,
+        default=None,
+        help="Maximum number of files to convert (None = all). Useful for testing.",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         required=True,
-        help="Directory for output files",
+        help="Directory for output files (new folder structure will be created)",
     )
     parser.add_argument(
         "--log-level",
@@ -561,22 +679,73 @@ def main():
     # Set log level
     logging.getLogger().setLevel(getattr(logging, args.log_level))
     
-    # Auto-discover all ome.tiff images
-    images = discover_images(args.input_dir)
+    # Auto-discover all converted ome.tiff images (recursively)
+    images = discover_converted_images(args.converted_dir)
+    logger.info(f"Found {len(images)} converted images in converted directory")
+    
+    # Also search in original input directory if provided (in case files were converted in place)
+    if args.original_input_dir and args.original_input_dir.exists():
+        logger.info(f"Also searching in original input directory: {args.original_input_dir}")
+        original_images = discover_converted_images(args.original_input_dir)
+        logger.info(f"Found {len(original_images)} converted images in original input directory")
+        # Add images that aren't already in the list
+        existing_paths = {img for img in images}
+        new_images = [img for img in original_images if img not in existing_paths]
+        images.extend(new_images)
+        images = sorted(set(images))  # Remove duplicates and sort
+        if new_images:
+            logger.info(f"Added {len(new_images)} additional images from original input directory")
+    
+    # Auto-convert missing files if requested
+    if args.auto_convert and args.original_input_dir and args.original_input_dir.exists():
+        logger.info("")
+        logger.info("Auto-converting missing ND2/OIR files...")
+        nd2_files = discover_nd2_files(args.original_input_dir)
+        logger.info(f"Found {len(nd2_files)} ND2/OIR files in original input directory")
+        
+        if nd2_files:
+            converted_new = convert_missing_files(
+                nd2_files,
+                args.converted_dir,
+                max_files=args.max_convert
+            )
+            # Add newly converted files to the images list
+            existing_paths = {img for img in images}
+            for new_img in converted_new:
+                if new_img not in existing_paths:
+                    images.append(new_img)
+            images = sorted(set(images))
+            logger.info(f"Total converted images available: {len(images)}")
     
     if not images:
-        logger.error(f"No ome.tiff images found in {args.input_dir}")
+        logger.error(f"No .ome.tiff images found in {args.converted_dir}")
+        if args.original_input_dir:
+            logger.error(f"  and no .ome.tiff images found in {args.original_input_dir}")
+        if not args.auto_convert:
+            logger.error("  Try running with --auto-convert to automatically convert ND2/OIR files")
+        else:
+            logger.error("  No files were converted. Check that ND2/OIR files exist in the original input directory.")
         sys.exit(1)
     
-    logger.info("=" * 60)
-    logger.info("Puncta Detection Pipeline - Full Batch Test")
-    logger.info("=" * 60)
-    logger.info(f"Input directory: {args.input_dir}")
-    logger.info(f"Output directory: {args.output_dir}")
-    logger.info(f"Discovered {len(images)} images:")
+    # Group images by parent directory for better logging
+    images_by_folder = {}
     for img in images:
-        ctrl_tag = " (control)" if is_control_image(img) else ""
-        logger.info(f"  - {img.name}{ctrl_tag}")
+        parent = img.parent.name if img.parent != args.converted_dir else "root"
+        if parent not in images_by_folder:
+            images_by_folder[parent] = []
+        images_by_folder[parent].append(img)
+    
+    logger.info("=" * 60)
+    logger.info("Puncta Detection Pipeline - Converted Files Batch")
+    logger.info("=" * 60)
+    logger.info(f"Converted files directory: {args.converted_dir}")
+    logger.info(f"Output directory: {args.output_dir}")
+    logger.info(f"Discovered {len(images)} images across {len(images_by_folder)} folder(s):")
+    for folder, folder_images in sorted(images_by_folder.items()):
+        logger.info(f"  {folder}/ ({len(folder_images)} images):")
+        for img in folder_images:
+            ctrl_tag = " (control)" if is_control_image(img) else ""
+            logger.info(f"    - {img.name}{ctrl_tag}")
     logger.info(f"Channel names: {CHANNEL_NAMES}")
     logger.info(f"Z-slice strategy: {Z_SLICE_STRATEGY}")
     logger.info("=" * 60)
@@ -584,10 +753,31 @@ def main():
     # Create output directory
     args.output_dir.mkdir(parents=True, exist_ok=True)
     
+    # Filter out already processed images
+    images_to_process = []
+    images_skipped = []
+    
+    for image_path in images:
+        if is_already_processed(image_path, args.output_dir):
+            images_skipped.append(image_path)
+            logger.info(f"Skipping {image_path.name} (already processed)")
+        else:
+            images_to_process.append(image_path)
+    
+    if images_skipped:
+        logger.info(f"Skipped {len(images_skipped)} already processed image(s)")
+    
+    if not images_to_process:
+        logger.warning("All images have already been processed!")
+        sys.exit(0)
+    
+    logger.info(f"Processing {len(images_to_process)} image(s)...")
+    logger.info("")
+    
     # Process each image
     all_results = []
     
-    for image_path in images:
+    for image_path in images_to_process:
         result = run_pipeline(image_path, args.output_dir)
         all_results.append(result)
     
@@ -601,6 +791,15 @@ def main():
     logger.info("SUMMARY")
     logger.info("=" * 60)
     
+    # Show skipped images
+    if images_skipped:
+        logger.info(f"Skipped {len(images_skipped)} already processed image(s):")
+        for img in images_skipped:
+            ctrl_tag = " (control)" if is_control_image(img) else ""
+            logger.info(f"  ⊘ {img.stem}{ctrl_tag}")
+        logger.info("")
+    
+    # Show processed images
     for r in all_results:
         status = "✓" if r.get("success") else "✗"
         puncta = r.get("puncta_count", "N/A")
@@ -616,8 +815,11 @@ def main():
     # Count successes/failures
     n_success = sum(1 for r in all_results if r.get("success"))
     n_total = len(all_results)
+    n_skipped = len(images_skipped)
     logger.info("")
-    logger.info(f"Completed: {n_success}/{n_total} images processed successfully")
+    logger.info(f"Processed: {n_success}/{n_total} images successfully")
+    if n_skipped > 0:
+        logger.info(f"Skipped: {n_skipped} already processed image(s)")
     logger.info(f"Results saved to: {args.output_dir}")
 
 
