@@ -54,9 +54,10 @@ uv.lock
 .env.development.local
 .env.test.local
 .env.production.local
-paper/
+paper-writing/
 
 *.DS_Store
+.DS_Store
 __marimo__/
 my_notebook.py
 trying_to_improve_background_removal.ipynb
