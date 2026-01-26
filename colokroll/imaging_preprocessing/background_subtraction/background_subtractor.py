@@ -37,6 +37,7 @@ from .cuda_backend import subtract_background_cuda
 from .mps_backend import subtract_background_mps
 from .scorer import BackgroundScorer
 from .auto_selector import AutoModeSelector, AUTO_METHODS, DEFAULT_COARSE_SEEDS, REFINE_POINTS, SECOND_REFINE_POINTS
+from .auto_bg_config import AUTO_BG_CONFIG
 from .visualization import VisualizationHelper
 
 # Optional backends are lazy-loaded to keep imports light

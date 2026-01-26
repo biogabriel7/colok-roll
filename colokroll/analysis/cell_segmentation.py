@@ -201,7 +201,6 @@ class CellSegmenter:
         elif output_format == "png8":
             from imageio import imwrite
             path = Path(out_path) if out_path is not None else self.tmp_dir / "cellpose_composite.png"
-            # Simple conversion matching batch_whole_analysis.py approach
             imwrite(str(path), (composite01 * 255).astype(np.uint8))
             return path
         else:

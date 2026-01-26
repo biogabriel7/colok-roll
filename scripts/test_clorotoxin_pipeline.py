@@ -395,8 +395,8 @@ def run_pipeline(
         
         seg = segmenter.segment_from_results(
             results=bg_results,
-            channel_a="Chlorotoxin",
-            channel_b="Chlorotoxin",
+            channel_a="DAPI",
+            channel_b="Phalloidin",
             channel_weights=(1.0, 0.0),
             projection="mip",
             output_format="png8",
