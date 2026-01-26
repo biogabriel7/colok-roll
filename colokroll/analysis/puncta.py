@@ -420,6 +420,7 @@ def _detect_spots_bigfish(
     spot_radius_px: float,
     cell_mask: Optional[np.ndarray] = None,
     return_threshold_data: bool = False,
+    min_snr_threshold: float = 5.0,
 ) -> Union[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray, Dict[str, Any]]]:
     """
     Detect spots using BigFISH with automatic thresholding.
@@ -432,6 +433,8 @@ def _detect_spots_bigfish(
         spot_radius_px: Expected spot radius in pixels (used for LoG sigma).
         cell_mask: Optional labeled cell mask to restrict detection.
         return_threshold_data: If True, return elbow curve data for plotting.
+        min_snr_threshold: Minimum SNR threshold to apply when BigFISH auto-threshold
+            fails (returns 0 or None). This prevents detecting noise as spots.
 
     Returns:
         If return_threshold_data is False:
@@ -449,51 +452,194 @@ def _detect_spots_bigfish(
     # Import additional BigFISH modules for threshold data
     from bigfish import stack as bigfish_stack
 
-    # BigFISH expects spot radius as tuple (z, y, x) or (y, x) for 2D
-    spot_radius = (spot_radius_px, spot_radius_px)
+    # Compute LoG kernel size and minimum distance from spot radius
+    # LoG kernel size should be ~2x the spot radius (diameter)
+    log_kernel_size = max(3, int(round(spot_radius_px * 2)))
+    # Ensure odd kernel size
+    if log_kernel_size % 2 == 0:
+        log_kernel_size += 1
+    min_distance = max(1, int(round(spot_radius_px)))
+    
+    # For 2D images, use (y, x) tuple format
+    log_kernel_2d = (log_kernel_size, log_kernel_size)
+    min_distance_2d = (min_distance, min_distance)
 
-    # Step 1: Apply LoG filter
-    image_filtered = bigfish_stack.log_filter(
+    # Use the high-level detect_spots API which handles thresholding correctly
+    spots, threshold = bigfish_detection.detect_spots(
         image.astype(np.float64),
-        sigma=spot_radius,
+        threshold=None,  # Auto-threshold using elbow method
+        return_threshold=True,
+        log_kernel_size=log_kernel_2d,
+        minimum_distance=min_distance_2d,
     )
 
-    # Step 2: Detect local maxima
-    local_maxima = bigfish_detection.local_maximum_detection(
-        image_filtered,
-        min_distance=spot_radius,
-    )
+    # Handle edge cases: threshold can be None (no spots)
+    if threshold is None:
+        threshold_scalar = 0.0
+        logger.warning("BigFISH detected 0 spots (no valid threshold found)")
+    elif isinstance(threshold, np.ndarray):
+        # Handle numpy arrays (shouldn't happen with detect_spots, but be safe)
+        if threshold.size == 0:
+            threshold_scalar = 0.0
+            logger.warning("BigFISH returned empty threshold array")
+        elif threshold.size == 1:
+            threshold_scalar = float(threshold.flat[0])
+        else:
+            threshold_scalar = float(threshold.flat[0])
+            logger.warning(f"BigFISH returned multi-element threshold (shape={threshold.shape})")
+    else:
+        threshold_scalar = float(threshold)
 
-    # Step 3: Get threshold using automatic thresholding (elbow method)
-    # This returns spots AND threshold data
-    spots, threshold = bigfish_detection.spots_thresholding(
-        image_filtered,
-        local_maxima,
-        threshold=None,  # Auto-threshold
-    )
+    # Compute LoG-filtered image for fallback validation
+    sigma = (spot_radius_px, spot_radius_px)
+    image_filtered = bigfish_stack.log_filter(image.astype(np.float64), sigma=sigma)
+    
+    # Compute percentiles of LoG-filtered intensities (only positive values)
+    positive_intensities = image_filtered[image_filtered > 0]
+    if len(positive_intensities) > 0:
+        p95 = float(np.percentile(positive_intensities, 95))
+        p99 = float(np.percentile(positive_intensities, 99))
+    else:
+        p95 = p99 = 0.0
 
-    logger.info(f"BigFISH detected {len(spots)} spots with auto-threshold={threshold:.2f}")
+    # FALLBACK: If BigFISH couldn't find a valid threshold (returns 0 or very low),
+    # apply an SNR-based minimum threshold to prevent detecting noise as spots.
+    # This is critical for negative control images where signal is minimal.
+    used_fallback = False
+    fallback_reason = None
+    original_spot_count = len(spots)
+    
+    if threshold_scalar <= 0.01 and len(spots) > 0:
+        # FALLBACK 1: Threshold too LOW
+        # Estimate background from LoG-filtered image
+        # Use median + MAD for robust estimation
+        median_val = float(np.median(image_filtered))
+        mad = float(np.median(np.abs(image_filtered - median_val)))
+        robust_std = 1.4826 * mad  # MAD to std conversion
+        
+        # Compute SNR-based threshold
+        fallback_threshold = median_val + min_snr_threshold * robust_std
+        
+        logger.warning(
+            f"BigFISH auto-threshold TOO LOW (threshold={threshold_scalar:.4f}, "
+            f"detected {original_spot_count} spots). "
+            f"Applying fallback SNR-based threshold: {fallback_threshold:.2f} "
+            f"(median={median_val:.2f}, std={robust_std:.2f}, SNR={min_snr_threshold})"
+        )
+        
+        # Re-detect spots with the fallback threshold
+        spots, _ = bigfish_detection.detect_spots(
+            image.astype(np.float64),
+            threshold=fallback_threshold,
+            return_threshold=True,
+            log_kernel_size=log_kernel_2d,
+            minimum_distance=min_distance_2d,
+        )
+        threshold_scalar = fallback_threshold
+        used_fallback = True
+        fallback_reason = "threshold_too_low"
+        
+        # If fallback still detects many spots (e.g., >50% of original), 
+        # it's likely noise - return 0 spots
+        if len(spots) > 0 and original_spot_count > 0:
+            ratio = len(spots) / original_spot_count
+            if ratio > 0.3:  # More than 30% of "noise spots" still detected
+                logger.warning(
+                    f"Fallback still detected {len(spots)} spots ({ratio:.0%} of original). "
+                    f"Image likely contains only noise - returning 0 spots."
+                )
+                spots = np.empty((0, 2), dtype=np.int64)
+    
+    elif threshold_scalar > p99 and p99 > 0:
+        # FALLBACK 2: Threshold too HIGH (NEW)
+        # This catches cases where extreme outliers skew the LoG-filtered distribution
+        fallback_threshold = p95
+        
+        logger.warning(
+            f"BigFISH auto-threshold TOO HIGH (threshold={threshold_scalar:.4f} > "
+            f"p99={p99:.4f}, detected {original_spot_count} spots). "
+            f"Elbow detection likely failed due to extreme outliers. "
+            f"Applying percentile-based fallback: {fallback_threshold:.4f} (95th percentile)"
+        )
+        
+        # Re-detect spots with the fallback threshold
+        spots_fallback, _ = bigfish_detection.detect_spots(
+            image.astype(np.float64),
+            threshold=fallback_threshold,
+            return_threshold=True,
+            log_kernel_size=log_kernel_2d,
+            minimum_distance=min_distance_2d,
+        )
+        
+        # Validate: fallback should detect significantly more spots
+        # At least 10x more, or at least 50 spots if original was very low
+        min_expected_increase = max(10, original_spot_count * 10)
+        
+        if len(spots_fallback) >= min_expected_increase or (len(spots_fallback) >= 50 and original_spot_count < 10):
+            logger.info(
+                f"Fallback successful: detected {len(spots_fallback)} spots "
+                f"(vs {original_spot_count} with auto-threshold)"
+            )
+            spots = spots_fallback
+            threshold_scalar = fallback_threshold
+            used_fallback = True
+            fallback_reason = "threshold_too_high"
+        else:
+            logger.warning(
+                f"Fallback validation failed: only detected {len(spots_fallback)} spots "
+                f"(expected >={min_expected_increase}). "
+                f"Keeping original threshold={threshold_scalar:.4f} with {original_spot_count} spots."
+            )
+    
+    logger.info(
+        f"BigFISH detected {len(spots)} spots with "
+        f"{'fallback' if used_fallback else 'auto'}-threshold={threshold_scalar:.2f}"
+        + (f" (reason: {fallback_reason})" if fallback_reason else "")
+    )
 
     # Compute elbow curve data if requested
     threshold_data = None
     if return_threshold_data:
+        # Apply LoG filter to get the filtered image for threshold analysis
+        sigma = (spot_radius_px, spot_radius_px)
+        image_filtered = bigfish_stack.log_filter(image.astype(np.float64), sigma=sigma)
+        
         # Generate threshold range for elbow curve
         max_val = float(image_filtered.max())
         min_val = float(image_filtered[image_filtered > 0].min()) if np.any(image_filtered > 0) else 0
         thresholds = np.linspace(min_val, max_val, num=100)
 
+        # Get local maxima mask and convert to coordinates
+        local_maxima_mask = bigfish_detection.local_maximum_detection(
+            image_filtered,
+            min_distance=min_distance_2d,
+        )
+        # Convert boolean mask to coordinates
+        local_maxima_coords = np.argwhere(local_maxima_mask)
+        
         # Count spots at each threshold
         spot_counts = []
-        for t in thresholds:
-            count = int(np.sum(image_filtered[local_maxima[:, 0], local_maxima[:, 1]] >= t))
-            spot_counts.append(count)
+        if len(local_maxima_coords) > 0:
+            for t in thresholds:
+                count = int(np.sum(image_filtered[local_maxima_coords[:, 0], local_maxima_coords[:, 1]] >= t))
+                spot_counts.append(count)
+            local_maxima_count = len(local_maxima_coords)
+        else:
+            spot_counts = [0] * len(thresholds)
+            local_maxima_count = 0
 
         threshold_data = {
-            "threshold": float(threshold),
+            "threshold": threshold_scalar,
             "thresholds": thresholds.tolist(),
             "spot_counts": spot_counts,
-            "local_maxima_count": len(local_maxima),
+            "local_maxima_count": local_maxima_count,
             "filtered_spots_count": len(spots),
+            "used_fallback": used_fallback,
+            "fallback_reason": fallback_reason,
+            "log_intensity_percentiles": {
+                "p95": p95,
+                "p99": p99,
+            },
         }
 
     # Filter spots to only those within cell mask if provided
@@ -1195,10 +1341,152 @@ def plot_puncta_elbow(
     return ax
 
 
+def plot_puncta_detection(
+    result: Dict[str, Any],
+    image_2d: np.ndarray,
+    cell_mask: Optional[np.ndarray] = None,
+    figsize: Tuple[float, float] = (15, 5),
+    radius_px: int = 5,
+    title: Optional[str] = None,
+) -> Any:
+    """
+    Plot detected puncta overlaid on image using BigFISH visualization.
+    
+    Creates a multi-panel figure showing:
+    - Panel A: MIP image with detected spots (circles) using BigFISH plot_detection
+    - Panel B: Cell mask with spots colored by cell assignment
+    - Panel C: Elbow curve (if threshold_data available)
+    
+    Args:
+        result: Output from compute_puncta() with puncta coordinates.
+        image_2d: 2D image used for detection (typically MIP).
+        cell_mask: Optional 2D labeled cell mask.
+        figsize: Figure size (width, height) in inches.
+        radius_px: Radius for spot markers in pixels.
+        title: Optional title for the figure.
+        
+    Returns:
+        matplotlib figure object.
+        
+    Raises:
+        ValueError: If result doesn't contain puncta data.
+        RuntimeError: If required dependencies are missing.
+        
+    Example:
+        >>> # After puncta detection
+        >>> alix_mip = np.max(bg_results["ALIX"][0], axis=0)
+        >>> fig = plot_puncta_detection(puncta_result, alix_mip, cell_mask=mask)
+        >>> fig.savefig("detection_overlay.png", dpi=150)
+        >>> plt.close(fig)
+    """
+    if "results" not in result or "puncta" not in result["results"]:
+        raise ValueError(
+            "Result does not contain puncta data. "
+            "Ensure compute_puncta() completed successfully."
+        )
+    
+    # Import dependencies
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.colors import ListedColormap
+    except ImportError:
+        raise RuntimeError("matplotlib is required for plotting. Install with: pip install matplotlib")
+    
+    try:
+        from bigfish import plot as bigfish_plot
+    except ImportError:
+        raise RuntimeError("bigfish is required for plotting. Install with: pip install big-fish")
+    
+    # Extract spot coordinates from puncta results
+    puncta_list = result["results"]["puncta"]
+    spots = np.array([
+        [p["centroid_y"], p["centroid_x"]]
+        for p in puncta_list
+    ])
+    
+    # Determine number of panels based on available data
+    has_threshold_data = "threshold_data" in result
+    n_panels = 3 if has_threshold_data else 2
+    
+    # Create figure with subplots
+    fig, axes = plt.subplots(1, n_panels, figsize=figsize)
+    if n_panels == 1:
+        axes = [axes]
+    
+    # Panel A: Detection overlay (manual plotting for better control)
+    ax_detection = axes[0]
+    # Display image with contrast adjustment (similar to BigFISH)
+    vmin, vmax = np.percentile(image_2d, [1, 99])
+    ax_detection.imshow(image_2d, cmap="gray", vmin=vmin, vmax=vmax, interpolation="nearest")
+    
+    # Overlay detected spots as circles
+    if len(spots) > 0:
+        for spot in spots:
+            y, x = spot
+            circle = plt.Circle((x, y), radius_px, color="red", fill=False, 
+                              linewidth=1.5, alpha=0.8)
+            ax_detection.add_patch(circle)
+    ax_detection.set_title(f"Detected Spots (n={len(spots)})", fontsize=12)
+    ax_detection.axis("off")
+    
+    # Panel B: Cell mask with spots
+    ax_mask = axes[1]
+    if cell_mask is not None:
+        # Create a colorful display of cells
+        ax_mask.imshow(cell_mask, cmap="nipy_spectral", interpolation="nearest")
+        
+        # Overlay spots, colored by cell assignment
+        if len(spots) > 0:
+            spot_cell_labels = []
+            for p in puncta_list:
+                spot_cell_labels.append(p.get("cell_label", 0))
+            
+            # Plot spots with marker
+            for i, (spot, cell_label) in enumerate(zip(spots, spot_cell_labels)):
+                y, x = spot
+                color = "white" if cell_label == 0 else "red"
+                marker_size = 40 if cell_label > 0 else 20
+                ax_mask.scatter(x, y, s=marker_size, c=color, marker="o", 
+                              edgecolors="black", linewidths=0.5, alpha=0.7)
+        
+        ax_mask.set_title(f"Cell Segmentation with Spots", fontsize=12)
+    else:
+        # No mask, just show the image with spots as scatter
+        ax_mask.imshow(image_2d, cmap="gray")
+        if len(spots) > 0:
+            ax_mask.scatter(spots[:, 1], spots[:, 0], s=40, c="red", 
+                          marker="o", edgecolors="white", linewidths=0.5, alpha=0.7)
+        ax_mask.set_title(f"Spots Overlay", fontsize=12)
+    ax_mask.axis("off")
+    
+    # Panel C: Elbow curve (if available)
+    if has_threshold_data:
+        ax_elbow = axes[2]
+        try:
+            plot_puncta_elbow(result, ax=ax_elbow, title=None)
+        except Exception as e:
+            logger.warning(f"Could not plot elbow curve: {e}")
+            ax_elbow.text(0.5, 0.5, "Elbow curve\nnot available", 
+                         ha="center", va="center", transform=ax_elbow.transAxes)
+            ax_elbow.axis("off")
+    
+    # Set main title
+    if title is None:
+        channel = result.get("channel", "Unknown")
+        method = result.get("detection_params", {}).get("detection_method", "unknown")
+        title = f"Puncta Detection - {channel} ({method})"
+    
+    fig.suptitle(title, fontsize=14, fontweight="bold")
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    
+    return fig
+
+
 __all__ = [
     "compute_puncta",
     "export_puncta_json",
     "plot_puncta_elbow",
+    "plot_puncta_detection",
 ]
 
 

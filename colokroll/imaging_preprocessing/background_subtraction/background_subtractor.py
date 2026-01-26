@@ -35,6 +35,7 @@ from .backends import BackendAdapter, CpuAdapter, CudaAdapter, MpsAdapter
 from .cpu_backend import subtract_background_cpu
 from .cuda_backend import subtract_background_cuda
 from .mps_backend import subtract_background_mps
+from .auto_bg_config import AUTO_BG_CONFIG
 
 # Optional backends are lazy-loaded to keep imports light
 CUDA_AVAILABLE = False
@@ -1231,6 +1232,24 @@ class BackgroundSubtractor:
         auto_cache_score_tolerance = float(kwargs.pop("auto_cache_score_tolerance", 0.05))
 
         channel_key = self._normalize_channel_key(channel_name)
+        
+        # Check for force_default in AUTO_BG_CONFIG - skip all search and use predefined params
+        channel_config = AUTO_BG_CONFIG.get(channel_name or "", AUTO_BG_CONFIG.get(channel_key, {}))
+        if channel_config.get("force_default", False) and "default" in channel_config:
+            default_cfg = channel_config["default"]
+            default_method = default_cfg.get("method", "gaussian")
+            default_params = {k: v for k, v in default_cfg.items() if k != "method"}
+            self.logger.info(f"Using force_default for {channel_name}: method={default_method}, params={default_params}")
+            corrected, metadata = self._run_single(image, default_method, default_params, channel_name, pixel_size)
+            method_suffix = f'_{self.backend}' if self.backend != 'cpu' else ''
+            metadata.update({
+                "auto_selected": True,
+                "auto_mode": "force_default",
+                "auto_force_default": True,
+                "parameters_used": default_params,
+                "method": metadata.get("method", f"{default_method}{method_suffix}"),
+            })
+            return corrected, metadata
         cache = self._load_auto_cache()
         channel_entry = cache.get("channels", {}).get(channel_key, {})
 

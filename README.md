@@ -6,150 +6,145 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-ColokRoll is a Python toolkit designed for analyzing colocalization in multi-channel fluorescence microscopy images. It provides a complete pipeline from image loading to cell segmentation and colocalization quantification.
+ColokRoll is a Python toolkit designed for analyzing colocalization in multi-channel fluorescence microscopy images. It provides a complete pipeline from image loading to cell segmentation, colocalization quantification, and puncta analysis.
 
 ---
 
 ## Features
 
-### Data Processing
-- **Multi-format support**: Load images from `.nd2` (Nikon), `.oir` (Olympus), `.ome.tiff`, and standard TIFF formats
-- **MIP Creation**: Maximum Intensity Projection with multiple methods
-- **SME Projection**: Surface Manifold Extraction for 2.5D object handling with improved signal preservation
+| Module | Description |
+|--------|-------------|
+| **Image Loading** | Multi-format support (`.nd2`, `.oir`, `.ome.tiff`, TIFF) |
+| **Z-Slice Detection** | Focus-based filtering with multiple strategies |
+| **Background Subtraction** | GPU-accelerated with negative control support |
+| **Cell Segmentation** | Cellpose integration via HuggingFace Spaces |
+| **Colocalization** | Pearson, Manders, Jaccard metrics per-cell |
+| **Puncta Analysis** | LoG and BigFISH detection methods |
 
-### Image Preprocessing
-- **Z-slice detection**: Automatically identify and filter out-of-focus slices using focus metrics (Laplacian, Tenengrad, FFT)
-- **Background subtraction**: Rolling ball algorithm with optional GPU acceleration (CuPy)
-- **Quality control**: Focus quality metrics and automated slice selection
+---
 
-### Analysis
-- **Cell segmentation**: Integration with [Cellpose](https://www.cellpose.org/) via HuggingFace Spaces API
-- **Nuclei detection**: Automated nuclei identification
-- **Colocalization metrics**: Pearson, Manders, and intensity correlation analysis
+## Workflow Modes
 
-### Visualization
-- Multi-channel composite generation
-- Segmentation overlays with cell boundaries
-- Z-slice focus score plots
-- SME manifold visualization
+ColokRoll supports two workflow modes for processing microscopy data:
+
+### 🔍 Exploratory Mode (Parameter Calibration)
+
+Use on your first image to visually inspect and select optimal parameters:
+
+```python
+import colokroll as cr
+
+# Compare Z-slice detection strategies
+comparison = cr.compare_strategies(image, display_inline=True)
+
+# Visually inspect and pick the best strategy
+result = comparison.results["FFT + Closest (k=14)"]
+filtered_image = image[result.indices_keep]
+
+# Calibrate background subtraction with negative control
+corrected, meta = bg_subtractor.subtract_background(
+    image=channel_data,
+    channel_name="ALIX",
+    is_negative_control=True,  # Optimize for minimal residual signal
+)
+# Extract validated parameters for batch processing
+best_params = meta['parameters_used']
+```
+
+### 🚀 Batch Mode (Production Processing)
+
+Apply validated parameters consistently across all images:
+
+```python
+# Use explicit parameters from calibration
+result = cr.select_z_slices(image, method="fft", strategy="closest", keep_top=14)
+
+# Apply validated background subtraction parameters
+corrected, meta = bg_subtractor.subtract_background(
+    image=channel_data,
+    method="two_stage",
+    **validated_params  # From negative control calibration
+)
+```
+
+📖 **See [docs/workflow_modes.md](docs/workflow_modes.md) for detailed guidance.**
 
 ---
 
 ## Installation
 
-### Using pip (recommended)
-
 ```bash
-# Clone the repository
+# Clone and install
 git clone https://github.com/SaezAtienzar/colok-roll.git
 cd colok-roll
-
-# Install in development mode
 pip install -e .
-```
 
-### Using conda
-
-```bash
-# Clone the repository
-git clone https://github.com/SaezAtienzar/colok-roll.git
-cd colok-roll
-
-# Create environment from file
-conda env create -f environment.yml
-conda activate colok-roll
-
-# Install the package
-pip install -e .
-```
-
-### Optional dependencies
-
-```bash
-# For deep learning features (StarDist, etc.)
-pip install -e ".[ml]"
-
-# For GPU acceleration (requires CUDA)
+# With GPU acceleration
 pip install -e ".[gpu]"
-
-# Full installation
-pip install -e ".[full]"
-
-# Development tools
-pip install -e ".[dev]"
 ```
 
 ---
 
 ## Quick Start
 
-### Basic Image Loading and Projection
-
 ```python
-from colokroll.data_processing import ImageLoader, MIPCreator
+import colokroll as cr
+from pathlib import Path
 
-# Load a microscopy image
-loader = ImageLoader()
-image = loader.load_image("path/to/image.x")
+# 1. Load image
+loader = cr.ImageLoader()
+image = loader.load_image("path/to/image.ome.tiff")
+loader.rename_channels(['DAPI', 'ALIX', 'Phalloidin', 'LAMP1'])
 
-print(f"Image shape: {image.shape}")  # (Z, Y, X, C)
-print(f"Channels: {loader.get_channel_names()}")
-print(f"Pixel size: {loader.get_pixel_size()} μm")
-
-# Create Maximum Intensity Projection
-mip_creator = MIPCreator()
-mip = mip_creator.create_mip(image, method="max")
-```
-
-### Z-Slice Filtering + SME Projection
-
-```python
-from colokroll.imaging_preprocessing import select_z_slices
-from colokroll.data_processing import MIPCreator
-
-# Filter out-of-focus slices
-result = select_z_slices(
-    image,
-    method="combined",      # Focus metric
-    strategy="relative",    # Detection strategy
-    threshold=0.6,          # Quality threshold
-)
-
-# Keep only in-focus slices
+# 2. Z-slice selection
+result = cr.select_z_slices(image, method="combined", strategy="relative", threshold=0.6)
 filtered_image = image[result.indices_keep]
-print(f"Kept {len(result.indices_keep)}/{image.shape[0]} slices")
 
-# Create SME projection for better signal preservation
-mip_creator = MIPCreator()
-sme_result = mip_creator.create_sme(
-    filtered_image,
-    reference_channel=1,    # Channel for manifold computation
+# 3. Background subtraction
+bg_subtractor = cr.BackgroundSubtractor()
+results = {}
+for i, ch in enumerate(loader.get_channel_names()):
+    corrected, meta = bg_subtractor.subtract_background(
+        image=filtered_image[:, :, :, i],
+        channel_name=ch,
+        is_negative_control=(ch == "ALIX"),  # If this is a negative control
+    )
+    results[ch] = (corrected, meta)
+
+# 4. Cell segmentation
+segmenter = cr.CellSegmenter(output_dir=Path("./output"))
+seg = segmenter.segment_from_results(
+    results=results,
+    channel_a="Phalloidin",
+    channel_b="DAPI",
 )
 
-projection = sme_result.projection  # (Y, X, C)
-manifold = sme_result.manifold      # Optimal Z per pixel
+# 5. Colocalization analysis
+import numpy as np
+corrected_stack = np.stack([results[ch][0] for ch in loader.get_channel_names()], axis=-1)
+
+coloc = cr.compute_colocalization(
+    image=corrected_stack,
+    mask=seg.mask_path,
+    channel_a="ALIX",
+    channel_b="LAMP1",
+    channel_names=loader.get_channel_names(),
+    thresholding="otsu",
+)
 ```
 
-### Cell Segmentation with Cellpose
+---
 
-```python
-from colokroll.analysis.cell_segmentation import CellSegmenter
+## Documentation
 
-# Initialize segmenter
-segmenter = CellSegmenter(
-    output_dir="/path/to/output",
-)
-
-# Segment cells from image array
-result = segmenter.segment_from_image_array(
-    image=filtered_image,
-    channel_indices=(1, 3),      # (cell body, nuclei)
-    channel_weights=(0.8, 0.2),  # Composite weights
-)
-
-print(f"Detected {result.mask_array.max()} cells")
-print(f"Mask saved to: {result.mask_path}")
-```
+| Guide | Description |
+|-------|-------------|
+| [Workflow Modes](docs/workflow_modes.md) | Exploratory vs Batch processing |
+| [Z-Slice Detection](docs/z_slice_detection.md) | Focus metrics and strategy comparison |
+| [Background Subtraction](docs/background_subtraction.md) | Methods and negative control support |
+| [Cell Segmentation](docs/cell_segmentation.md) | Cellpose integration |
+| [Colocalization](docs/colocalization.md) | Metrics and analysis |
+| [Puncta Analysis](docs/puncta_analysis.md) | Spot detection with BigFISH |
 
 ---
 
@@ -157,62 +152,40 @@ print(f"Mask saved to: {result.mask_path}")
 
 ```
 colokroll/
-├── core/                    # Configuration, utilities, format conversion
-├── data_processing/         # Image loading and projection methods
-│   ├── image_loader.py      # Multi-format image loader
-│   └── projection.py        # MIP and SME projection
-├── imaging_preprocessing/   # Image preprocessing pipeline
-│   ├── z_slice_detection.py # Focus-based slice filtering
-│   └── background_subtraction/
-├── analysis/                # Analysis algorithms
-│   ├── cell_segmentation.py # Cellpose integration
-│   ├── nuclei_detection.py  # Nuclei identification
-│   └── colocalization.py    # Colocalization metrics
-└── visualization/           # Plotting and visualization tools
+├── core/                    # Configuration, utilities
+├── data_processing/         # Image loading, projections (MIP, SME)
+├── imaging_preprocessing/   # Z-slice detection, background subtraction
+├── analysis/                # Segmentation, colocalization, puncta
+└── visualization/           # Plotting tools
 ```
 
 ---
 
 ## Configuration
 
-### Cellpose API Setup
-
-Cell segmentation uses the HuggingFace Cellpose Space. Set your token:
-
-```bash
-export HUGGINGFACE_TOKEN="your_token_here"
-```
-
-Or create a `.env` file in your project directory.
-
 ### GPU Acceleration
-
-For GPU-accelerated background subtraction, install CuPy:
 
 ```bash
 pip install cupy-cuda12x  # For CUDA 12.x
 ```
 
+### Cellpose API
+
+Cell segmentation uses HuggingFace Cellpose Space (no local installation required).
+
 ---
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
+MIT License - see [LICENSE](LICENSE) for details.
 
 ## Acknowledgments
 
 - [Cellpose](https://github.com/MouseLand/cellpose) for cell segmentation
-- [BioIO](https://github.com/bioio-devs/bioio) for microscopy file format support
-- [scikit-image](https://scikit-image.org/) for image processing algorithms
+- [BigFISH](https://github.com/fish-quant/big-fish) for puncta detection
+- [BioIO](https://github.com/bioio-devs/bioio) for microscopy format support
+- [scikit-image](https://scikit-image.org/) for image processing
 
 ---
 
-## Contact
-
-**SaezAtienzar Lab**
-
-- GitHub: [@SaezAtienzar](https://github.com/SaezAtienzar)
-- Repository: [colok-roll](https://github.com/SaezAtienzar/colok-roll)
-
+**SaezAtienzar Lab** | [GitHub](https://github.com/SaezAtienzar/colok-roll)

@@ -12,7 +12,7 @@ import logging
 
 import numpy as np
 from PIL import Image
-import nd2reader
+import nd2
 import tifffile
 from skimage import io
 
@@ -356,11 +356,13 @@ class ImageLoader:
     def load_nd2(self, filepath: Union[str, Path]) -> np.ndarray:
         """Load an .nd2 file and extract metadata.
         
+        Uses the modern nd2 library for reliable data reading and metadata extraction.
+        
         Args:
             filepath: Path to the .nd2 file.
             
         Returns:
-            np.ndarray: Image data array with dimensions (Z, Y, X, C) or (Y, X, C).
+            np.ndarray: Image data array with dimensions (Z, Y, X, C).
             
         Raises:
             FileNotFoundError: If file doesn't exist.
@@ -372,72 +374,22 @@ class ImageLoader:
         logger.info(f"Loading ND2 file: {filepath}")
         
         try:
-            with nd2reader.ND2Reader(str(filepath)) as reader:
+            with nd2.ND2File(str(filepath)) as f:
+                # Get image data as numpy array
+                image_array = f.asarray()
+                
+                # Get dimension sizes
+                sizes = f.sizes  # e.g., {'T': 1, 'C': 4, 'Z': 31, 'Y': 1800, 'X': 1800}
+                source_axes = ''.join(sizes.keys())
+                
+                logger.info(f"ND2 file sizes: {sizes}")
+                logger.info(f"ND2 data shape: {image_array.shape}, axes: {source_axes}")
+                
                 # Extract metadata
-                self._extract_nd2_metadata(reader)
+                self._extract_nd2_metadata_from_file(f)
                 
-                # Determine dimensions
-                z_levels = len(reader.metadata.get('z_levels', [1]))
-                channels = len(reader.metadata.get('channels', []))
-                
-                if channels == 0:
-                    channels = 1
-                
-                # Handle different dimension configurations
-                if 'z' in reader.axes and 'c' in reader.axes:
-                    # Multi-channel, multi-z
-                    # We iterate manually using default_coords, so we must clear iter_axes
-                    # to ensure reader[0] returns the frame at default_coords
-                    reader.iter_axes = []
-                    reader.bundle_axes = 'yx'
-                    
-                    images = []
-                    for z in range(z_levels):
-                        channel_images = []
-                        for c in range(channels):
-                            reader.default_coords['z'] = z
-                            reader.default_coords['c'] = c
-                            channel_images.append(reader[0])
-                        images.append(np.stack(channel_images, axis=-1))
-                    
-                    image_array = np.stack(images, axis=0)
-                    
-                elif 'z' in reader.axes:
-                    # Single channel, multi-z
-                    reader.iter_axes = []
-                    reader.bundle_axes = 'yx'
-                    
-                    images = []
-                    for z in range(z_levels):
-                        reader.default_coords['z'] = z
-                        img = reader[0]
-                        if img.ndim == 2:
-                            img = img[..., np.newaxis]
-                        images.append(img)
-                    
-                    image_array = np.stack(images, axis=0)
-                    
-                elif 'c' in reader.axes:
-                    # Multi-channel, single z
-                    reader.iter_axes = []
-                    reader.bundle_axes = 'yx'
-                    
-                    images = []
-                    for c in range(channels):
-                        reader.default_coords['c'] = c
-                        images.append(reader[0])
-                    
-                    image_array = np.stack(images, axis=-1)
-                    if image_array.ndim == 3:
-                        image_array = image_array[np.newaxis, ...]
-                        
-                else:
-                    # Single channel, single z
-                    image_array = np.array(reader[0])
-                    if image_array.ndim == 2:
-                        image_array = image_array[np.newaxis, ..., np.newaxis]
-                    elif image_array.ndim == 3:
-                        image_array = image_array[np.newaxis, ...]
+                # Convert to ZYXC format
+                image_array = self._convert_to_zyxc(image_array, source_axes)
                 
                 # Validate dimensions
                 self._validate_image_dimensions(image_array)
@@ -452,22 +404,73 @@ class ImageLoader:
             logger.error(f"Failed to load ND2 file: {e}")
             raise ValueError(f"Error loading ND2 file: {e}")
     
-    def _extract_nd2_metadata(self, reader: nd2reader.ND2Reader) -> None:
-        """Extract metadata from ND2 reader.
+    def _convert_to_zyxc(self, data: np.ndarray, source_axes: str) -> np.ndarray:
+        """Convert array from source axes order to ZYXC format.
         
         Args:
-            reader: ND2Reader instance.
+            data: Input array.
+            source_axes: String indicating source axis order (e.g., 'TCZYX').
+            
+        Returns:
+            Array with ZYXC axis order.
         """
-        metadata = reader.metadata
+        source_axes = source_axes.upper()
         
-        if self.config.extract_all_metadata:
-            self.metadata = dict(metadata)
+        # Handle time dimension - take first timepoint
+        if 'T' in source_axes:
+            t_idx = source_axes.index('T')
+            data = np.take(data, 0, axis=t_idx)
+            source_axes = source_axes.replace('T', '')
         
-        # Extract pixel size
-        if 'pixel_microns' in metadata:
-            self.pixel_size_um = metadata['pixel_microns']
-        elif 'calibration' in metadata:
-            self.pixel_size_um = metadata['calibration']
+        # Now we should have some combination of C, Z, Y, X
+        # Common cases: CZYX, ZCYX, ZYX, YXC, YX
+        
+        if data.ndim == 2:
+            # YX -> ZYXC
+            return data[np.newaxis, :, :, np.newaxis]
+        
+        elif data.ndim == 3:
+            if source_axes == 'ZYX':
+                return data[..., np.newaxis]  # Add C
+            elif source_axes == 'CYX':
+                return np.transpose(data, (1, 2, 0))[np.newaxis, ...]  # CYX -> YXC -> ZYXC
+            elif source_axes == 'YXC':
+                return data[np.newaxis, ...]  # Add Z
+            else:
+                # Default: assume ZYX
+                return data[..., np.newaxis]
+        
+        elif data.ndim == 4:
+            if source_axes == 'CZYX':
+                return np.transpose(data, (1, 2, 3, 0))  # CZYX -> ZYXC
+            elif source_axes == 'ZCYX':
+                return np.transpose(data, (0, 2, 3, 1))  # ZCYX -> ZYXC
+            elif source_axes == 'ZYXC':
+                return data  # Already correct
+            else:
+                logger.warning(f"Unknown 4D axis order: {source_axes}, assuming CZYX")
+                return np.transpose(data, (1, 2, 3, 0))
+        
+        else:
+            raise ValueError(f"Unexpected data dimensions: {data.ndim}D with axes {source_axes}")
+    
+    def _extract_nd2_metadata_from_file(self, f: nd2.ND2File) -> None:
+        """Extract metadata from ND2 file using nd2 library.
+        
+        Args:
+            f: nd2.ND2File instance.
+        """
+        # Get voxel sizes (physical pixel sizes)
+        voxel_size = f.voxel_size()
+        pixel_size_x = voxel_size.x if voxel_size else None
+        pixel_size_y = voxel_size.y if voxel_size else None
+        pixel_size_z = voxel_size.z if voxel_size else None
+        
+        # Set pixel size
+        if pixel_size_x and pixel_size_y:
+            self.pixel_size_um = (pixel_size_x + pixel_size_y) / 2
+        elif pixel_size_x:
+            self.pixel_size_um = pixel_size_x
         else:
             raise ValueError(
                 "No pixel size found in image metadata. This is required for accurate "
@@ -475,21 +478,35 @@ class ImageLoader:
                 "calibration information, or manually specify pixel size when loading."
             )
         
-        # Extract channel information
-        if 'channels' in metadata:
-            self.channels = metadata['channels']
-        else:
-            raise ValueError(
-                "No channel information found in image metadata. Channel names are "
-                "required for proper analysis. Please ensure your image files contain "
-                "proper channel information."
-            )
+        # Extract channel names
+        channel_names = []
+        try:
+            if hasattr(f, 'metadata') and f.metadata:
+                channels_meta = f.metadata.channels
+                if channels_meta:
+                    for ch in channels_meta:
+                        if hasattr(ch, 'channel') and hasattr(ch.channel, 'name'):
+                            channel_names.append(ch.channel.name)
+                        elif hasattr(ch, 'name'):
+                            channel_names.append(ch.name)
+        except Exception as e:
+            logger.debug(f"Could not extract channel names from metadata: {e}")
         
-        # Store additional useful metadata
-        self.metadata['axes'] = reader.axes
-        self.metadata['shape'] = reader.frame_shape
-        self.metadata['z_levels'] = len(metadata.get('z_levels', [1]))
-        self.metadata['timepoints'] = reader.metadata.get('total_images_per_channel', 1)
+        # Fallback: use sizes to determine number of channels
+        num_channels = f.sizes.get('C', 1)
+        if not channel_names or len(channel_names) != num_channels:
+            channel_names = [f'Channel_{i}' for i in range(num_channels)]
+        
+        self.channels = channel_names
+        
+        # Store additional metadata
+        self.metadata['axes'] = ''.join(f.sizes.keys())
+        self.metadata['sizes'] = dict(f.sizes)
+        self.metadata['z_levels'] = f.sizes.get('Z', 1)
+        self.metadata['timepoints'] = f.sizes.get('T', 1)
+        self.metadata['pixel_size_x'] = pixel_size_x
+        self.metadata['pixel_size_y'] = pixel_size_y
+        self.metadata['pixel_size_z'] = pixel_size_z
     
     def _extract_ome_tiff_metadata(self, filepath: Path) -> None:
         """Extract metadata from OME-TIFF file's embedded OME-XML.

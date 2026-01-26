@@ -14,7 +14,7 @@ dependencies:
   - pillow>=9.0
   - tifffile>=2023.7
   - imageio>=2.31
-  - nd2reader>=3.3
+  - nd2>=0.10
   - pytorch>=2.0
   - torchvision
   - tensorflow>=2.8

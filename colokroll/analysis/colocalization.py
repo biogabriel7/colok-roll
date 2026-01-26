@@ -787,12 +787,57 @@ def _filter_labels(
     return out.astype(np.int32), info
 
 
+def _signal_floor_threshold(
+    data: np.ndarray,
+    computed_threshold: Optional[float],
+    min_sigma: float,
+) -> Tuple[Optional[float], bool]:
+    """
+    Ensure threshold is meaningfully above noise floor.
+    
+    If computed_threshold < mean + min_sigma * std, return the floor value instead.
+    This prevents noise from being counted as signal in channels with no real signal.
+    
+    Args:
+        data: Channel intensity vector.
+        computed_threshold: Threshold from Otsu/Costes/etc.
+        min_sigma: Minimum number of standard deviations above mean.
+    
+    Returns:
+        Tuple of (adjusted_threshold, was_floored) where was_floored indicates
+        if the threshold was raised to the floor value.
+    """
+    if computed_threshold is None or min_sigma <= 0:
+        return computed_threshold, False
+    
+    data_finite = data[np.isfinite(data)]
+    if data_finite.size == 0:
+        return computed_threshold, False
+    
+    mean_val = float(np.mean(data_finite))
+    std_val = float(np.std(data_finite))
+    
+    # Floor threshold: mean + min_sigma * std
+    floor = mean_val + min_sigma * std_val
+    
+    if computed_threshold < floor:
+        logger.debug(
+            "Threshold %.3f below signal floor (mean=%.3f + %.1f*std=%.3f = %.3f); "
+            "raising to floor",
+            computed_threshold, mean_val, min_sigma, std_val, floor
+        )
+        return floor, True
+    
+    return computed_threshold, False
+
+
 def _compute_thresholds(
     a: np.ndarray,
     b: np.ndarray,
     thresholding: str,
     fixed_thresholds: Optional[Tuple[float, float]] = None,
-) -> Tuple[Optional[float], Optional[float]]:
+    min_threshold_sigma: float = 0.0,
+) -> Tuple[Optional[float], Optional[float], Dict[str, Any]]:
     """
     Compute thresholds for Manders coefficients based on selected strategy.
     
@@ -801,25 +846,50 @@ def _compute_thresholds(
         b: Second channel intensity vector.
         thresholding: Strategy - 'none', 'otsu', 'costes', or 'fixed'.
         fixed_thresholds: Required if thresholding='fixed'.
+        min_threshold_sigma: Minimum sigma above mean for threshold (signal floor).
+            If computed threshold < mean + min_threshold_sigma * std, it will be
+            raised to that floor. Set to 0 to disable. Typical value: 3.0.
     
     Returns:
-        Tuple of (threshold_a, threshold_b), or (None, None) for 'none'.
+        Tuple of (threshold_a, threshold_b, meta) where meta contains:
+        - 'method': thresholding method used
+        - 'a_floored': whether channel A threshold was raised to floor
+        - 'b_floored': whether channel B threshold was raised to floor
+        - 'a_original': original threshold before flooring (if floored)
+        - 'b_original': original threshold before flooring (if floored)
     
     Raises:
         ValueError: If thresholding method is unknown or fixed_thresholds missing.
     """
+    meta: Dict[str, Any] = {"method": thresholding, "a_floored": False, "b_floored": False}
+    
     if thresholding == "none":
-        return None, None
+        return None, None, meta
     elif thresholding == "otsu":
-        return _otsu_threshold_1d(a), _otsu_threshold_1d(b)
+        t_a = _otsu_threshold_1d(a)
+        t_b = _otsu_threshold_1d(b)
     elif thresholding == "costes":
-        return _costes_thresholds(a, b)
+        t_a, t_b = _costes_thresholds(a, b)
     elif thresholding == "fixed":
         if not fixed_thresholds:
             raise ValueError("fixed_thresholds must be provided when thresholding='fixed'")
-        return float(fixed_thresholds[0]), float(fixed_thresholds[1])
+        t_a, t_b = float(fixed_thresholds[0]), float(fixed_thresholds[1])
     else:
         raise ValueError(f"thresholding must be one of {{'none','otsu','costes','fixed'}}, got '{thresholding}'")
+    
+    # Apply signal floor check if enabled
+    if min_threshold_sigma > 0:
+        t_a_orig, t_b_orig = t_a, t_b
+        t_a, a_floored = _signal_floor_threshold(a, t_a, min_threshold_sigma)
+        t_b, b_floored = _signal_floor_threshold(b, t_b, min_threshold_sigma)
+        meta["a_floored"] = a_floored
+        meta["b_floored"] = b_floored
+        if a_floored:
+            meta["a_original"] = t_a_orig
+        if b_floored:
+            meta["b_original"] = t_b_orig
+    
+    return t_a, t_b, meta
 
 
 def _plot_mask_with_indices(
@@ -893,6 +963,8 @@ def compute_colocalization(
     pearson_winsor_clip: Optional[float] = None,  # symmetric percentile clip for Pearson (e.g., 0.1)
     pearson_min_count: int = 2,
     pearson_min_range: float = 1e-12,
+    # Signal quality controls
+    min_threshold_sigma: float = 0.0,  # minimum sigma above mean for threshold (signal floor)
     # Output options
     output_json: Optional[Union[str, Path]] = None,  # save results to JSON if provided
 ) -> Dict[str, Any]:
@@ -1111,7 +1183,9 @@ def compute_colocalization(
                 raise ValueError("threshold_domain must be one of {'raw','normalized'}")
             
             # Determine thresholds for this Z-slice using extracted helper
-            t_a_z, t_b_z = _compute_thresholds(a_tsrc_z, b_tsrc_z, thresholding, fixed_thresholds)
+            t_a_z, t_b_z, thresh_meta = _compute_thresholds(
+                a_tsrc_z, b_tsrc_z, thresholding, fixed_thresholds, min_threshold_sigma
+            )
             
             # Compute Manders for this Z-slice
             m1_z, m2_z = _manders_m1_m2(a_tsrc_z, b_tsrc_z, t_a=t_a_z, t_b=t_b_z)
@@ -1122,11 +1196,18 @@ def compute_colocalization(
             # Accumulate voxel-weighted numerators for global M1/M2
             sum_a_over_b += float(np.sum(a_tsrc_z[b_tsrc_z > (t_b_z if t_b_z is not None else 0)]))
             sum_b_over_a += float(np.sum(b_tsrc_z[a_tsrc_z > (t_a_z if t_a_z is not None else 0)]))
-            thresholds_per_z.append({
+            thresh_info = {
                 "z": z_idx,
                 "t_a": None if t_a_z is None else float(t_a_z),
                 "t_b": None if t_b_z is None else float(t_b_z),
-            })
+                "a_floored": thresh_meta.get("a_floored", False),
+                "b_floored": thresh_meta.get("b_floored", False),
+            }
+            if thresh_meta.get("a_original") is not None:
+                thresh_info["a_original"] = float(thresh_meta["a_original"])
+            if thresh_meta.get("b_original") is not None:
+                thresh_info["b_original"] = float(thresh_meta["b_original"])
+            thresholds_per_z.append(thresh_info)
         
         # Aggregate Manders
         if manders_weighting == "slice":
