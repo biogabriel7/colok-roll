@@ -33,6 +33,7 @@ from .imaging_preprocessing import (
     select_z_slices,
     select_z_slices_auto_method,
     compare_strategies,
+    auto_select_best_method,
 )
 
 # Visualization
@@ -84,6 +85,7 @@ __all__ = [
     "select_z_slices",
     "select_z_slices_auto_method",
     "compare_strategies",
+    "auto_select_best_method",
     
     # Visualization
     "Visualizer",
