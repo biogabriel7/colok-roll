@@ -1,4 +1,4 @@
-# Cell Segmentation
+# Cell segmentation
 
 Automated cell segmentation using Cellpose via HuggingFace Spaces API.
 
@@ -15,7 +15,7 @@ ColokRoll integrates with [Cellpose](https://www.cellpose.org/) for cell segment
 
 ---
 
-## Quick Start
+## Quick start
 
 ```python
 import colokroll as cr
@@ -40,26 +40,26 @@ print(f"Mask saved to: {seg.mask_path}")
 
 ---
 
-## CellSegmenter Options
+## CellSegmenter options
 
 ### Initialization
 
 ```python
 segmenter = cr.CellSegmenter(
     output_dir=Path("./output"),  # Where to save masks/outlines
-    
+
     # Resize options for large images
     auto_resize=True,             # Auto-resize based on image size
     resize_candidates=[800, 600, 400],  # Candidate sizes to try
     max_dimension=1024,           # Max dimension for auto-resize
-    
+
     # Cellpose parameters (passed to API)
     flow_threshold=0.4,           # Flow error threshold
     cellprob_threshold=0.0,       # Cell probability threshold
 )
 ```
 
-### Resizing Behavior
+### Resizing behavior
 
 Large images (>1024px) are automatically resized for the API, then masks are resized back:
 
@@ -79,9 +79,9 @@ segmenter = cr.CellSegmenter(
 
 ---
 
-## Segmentation Methods
+## Segmentation methods
 
-### From Background Subtraction Results
+### From background subtraction results
 
 Use results directly from `BackgroundSubtractor`:
 
@@ -107,7 +107,7 @@ seg = segmenter.segment_from_results(
 )
 ```
 
-### From Image Array
+### From image array
 
 Segment directly from a numpy array:
 
@@ -121,7 +121,7 @@ seg = segmenter.segment_from_image_array(
 )
 ```
 
-### From File Path
+### From file path
 
 Segment from an image file:
 
@@ -135,7 +135,7 @@ seg = segmenter.segment_from_file(
 
 ---
 
-## Creating Composites
+## Creating composites
 
 The segmenter creates a weighted composite from two channels:
 
@@ -145,9 +145,9 @@ The segmenter creates a weighted composite from two channels:
 # composite = 0.8 * Phalloidin + 0.2 * DAPI
 ```
 
-### Weight Selection Tips
+### Weight selection tips
 
-| Use Case | Recommended Weights |
+| Use case | Recommended weights |
 |----------|-------------------|
 | Strong cell body signal | (1.0, 0.0) |
 | Add nuclei hint | (0.8, 0.2) or (0.9, 0.1) |
@@ -185,7 +185,7 @@ seg.n_cells        # Number of detected cells
 seg.composite_shape  # Shape of input composite
 ```
 
-### Output Files
+### Output files
 
 ```
 output/cellpose/
@@ -198,7 +198,7 @@ output/cellpose/
 
 ## Projections
 
-### Maximum Intensity Projection (MIP)
+### Maximum intensity projection (MIP)
 
 Default projection that takes the maximum value along Z:
 
@@ -211,7 +211,7 @@ seg = segmenter.segment_from_results(
 )
 ```
 
-### Surface Manifold Extraction (SME)
+### Surface manifold extraction (SME)
 
 For 2.5D objects, SME preserves more signal:
 
@@ -227,9 +227,9 @@ seg = segmenter.segment_from_results(
 
 ---
 
-## Integration with Pipeline
+## Integration with pipeline
 
-### Complete Workflow
+### Complete workflow
 
 ```python
 import colokroll as cr
@@ -272,7 +272,7 @@ mask_path = seg.mask_path
 
 ## Troubleshooting
 
-### API Connection Issues
+### API connection issues
 
 The segmenter uses HuggingFace Spaces, which requires internet access:
 
@@ -282,7 +282,7 @@ import gradio_client
 client = gradio_client.Client("mouseland/cellpose")
 ```
 
-### Large Images
+### Large images
 
 For very large images (>2048px), use aggressive resizing:
 
@@ -294,7 +294,7 @@ segmenter = cr.CellSegmenter(
 )
 ```
 
-### Poor Segmentation
+### Poor segmentation
 
 Adjust Cellpose parameters:
 
@@ -316,4 +316,3 @@ seg = segmenter.segment_from_results(
     channel_weights=(1.0, 0.0),  # Ignore nuclei
 )
 ```
-

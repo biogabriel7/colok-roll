@@ -1,21 +1,21 @@
-# Workflow Modes
+# Workflow modes
 
-ColokRoll supports two workflow modes for processing microscopy data: **Exploratory Mode** for parameter calibration and **Batch Mode** for production processing.
+ColokRoll has two workflow modes: exploratory mode for parameter calibration, and batch mode for production processing.
 
 ---
 
-## Exploratory Mode (Parameter Calibration)
+## Exploratory mode (parameter calibration)
 
-Use exploratory mode on your first image (or a representative sample) to visually inspect results and select optimal parameters for your dataset.
+Use exploratory mode on your first image (or a representative sample) to visually inspect results and pick optimal parameters.
 
-### When to Use
+### When to use
 
 - Processing a new dataset for the first time
 - Calibrating parameters with negative control samples
 - Comparing different strategies before batch processing
 - Debugging or optimizing results
 
-### Z-Slice Detection Calibration
+### Z-slice detection calibration
 
 Compare multiple strategies to find the best one for your data:
 
@@ -48,7 +48,7 @@ filtered_image = image[result.indices_keep]
 print(f"Kept {len(result.indices_keep)} / {image.shape[0]} slices")
 ```
 
-### Background Subtraction with Negative Control
+### Background subtraction with negative control
 
 Use a negative control sample to calibrate background subtraction parameters:
 
@@ -78,7 +78,7 @@ print(f"Best method: {best_method}")
 print(f"Best params: {best_params}")
 ```
 
-### Visualize Results
+### Visualize results
 
 ```python
 # Plot background subtraction comparison
@@ -92,17 +92,17 @@ fig = bg_subtractor.plot_background_subtraction_comparison(
 
 ---
 
-## Batch Mode (Production Processing)
+## Batch mode (production processing)
 
 Use batch mode to apply validated parameters consistently across all images in your dataset.
 
-### When to Use
+### When to use
 
 - Processing multiple images with the same acquisition settings
 - Running automated pipelines
 - Reproducible analysis with fixed parameters
 
-### Apply Calibrated Parameters
+### Apply calibrated parameters
 
 ```python
 import colokroll as cr
@@ -118,13 +118,13 @@ ALIX_BG_PARAMS = {'sigma_stage1': 0.5, 'radius_stage2': 5, 'light_background': F
 
 def process_image(image_path: Path) -> dict:
     """Process a single image with calibrated parameters."""
-    
+
     # 1. Load
     loader = cr.ImageLoader()
     image = loader.load_image(image_path)
     loader.rename_channels(['DAPI', 'ALIX', 'Phalloidin', 'LAMP1'])
     channel_names = loader.get_channel_names()
-    
+
     # 2. Z-slice selection (fixed parameters)
     result = cr.select_z_slices(
         image,
@@ -133,11 +133,11 @@ def process_image(image_path: Path) -> dict:
         keep_top=ZSLICE_KEEP_TOP,
     )
     filtered_image = image[result.indices_keep]
-    
+
     # 3. Background subtraction
     bg_subtractor = cr.BackgroundSubtractor()
     results = {}
-    
+
     for i, ch in enumerate(channel_names):
         if ch == "ALIX":
             # Use calibrated parameters from negative control
@@ -154,7 +154,7 @@ def process_image(image_path: Path) -> dict:
                 channel_name=ch,
             )
         results[ch] = (corrected, meta)
-    
+
     # 4. Segmentation
     segmenter = cr.CellSegmenter(output_dir=Path("./output"))
     seg = segmenter.segment_from_results(
@@ -163,11 +163,11 @@ def process_image(image_path: Path) -> dict:
         channel_b="DAPI",
         save_basename=image_path.stem,
     )
-    
+
     # 5. Colocalization
     import numpy as np
     corrected_stack = np.stack([results[ch][0] for ch in channel_names], axis=-1)
-    
+
     coloc = cr.compute_colocalization(
         image=corrected_stack,
         mask=seg.mask_path,
@@ -176,7 +176,7 @@ def process_image(image_path: Path) -> dict:
         channel_names=channel_names,
         thresholding="otsu",
     )
-    
+
     return {
         'image_path': str(image_path),
         'n_cells': len(coloc['results']['per_label']),
@@ -192,7 +192,7 @@ results = [process_image(p) for p in image_paths]
 
 ---
 
-## Workflow Summary
+## Workflow summary
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -219,15 +219,14 @@ results = [process_image(p) for p in image_paths]
 
 ---
 
-## Best Practices
+## Tips
 
-1. **Use representative samples** for calibration - pick images that represent the typical quality and signal levels in your dataset
+1. Use representative samples for calibration - pick images that match the typical quality and signal levels in your dataset
 
-2. **Validate negative controls** - check that `residual_mean` and `residual_std` are low after background subtraction
+2. Validate negative controls - check that `residual_mean` and `residual_std` are low after background subtraction
 
-3. **Save calibration parameters** - store the validated parameters (method, sigma, radius, etc.) for reproducibility
+3. Save calibration parameters - store the validated parameters (method, sigma, radius) for reproducibility
 
-4. **Document your choices** - record why you selected specific strategies and parameters
+4. Document your choices - record why you selected specific strategies and parameters
 
-5. **Re-calibrate when needed** - if acquisition settings change, re-run exploratory mode
-
+5. Re-calibrate when needed - if acquisition settings change, re-run exploratory mode

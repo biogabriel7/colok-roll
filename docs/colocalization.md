@@ -1,4 +1,4 @@
-# Colocalization Analysis
+# Colocalization analysis
 
 Quantify spatial correlation between fluorescent markers using standard colocalization metrics.
 
@@ -8,14 +8,14 @@ Quantify spatial correlation between fluorescent markers using standard colocali
 
 ColokRoll computes colocalization metrics between two channels:
 
-- **Pearson correlation**: Linear correlation of intensities
-- **Manders coefficients (M1/M2)**: Fraction of signal overlap
-- **Jaccard index**: Overlap of thresholded regions
+- Pearson correlation: linear correlation of intensities
+- Manders coefficients (M1/M2): fraction of signal overlap
+- Jaccard index: overlap of thresholded regions
 - Per-cell and whole-image metrics
 
 ---
 
-## Quick Start
+## Quick start
 
 ```python
 import colokroll as cr
@@ -44,9 +44,9 @@ print(f"Manders M2: {res['results']['total_image']['manders_m2']:.3f}")
 
 ---
 
-## Colocalization Metrics
+## Colocalization metrics
 
-### Pearson Correlation Coefficient
+### Pearson correlation coefficient
 
 Measures linear correlation between channel intensities:
 
@@ -62,12 +62,12 @@ $$r = \frac{\sum(A_i - \bar{A})(B_i - \bar{B})}{\sqrt{\sum(A_i - \bar{A})^2 \sum
 pearson = res['results']['total_image']['pearson_r']
 ```
 
-### Manders Coefficients
+### Manders coefficients
 
 Measure fractional overlap of signal:
 
-- **M1**: Fraction of channel A that overlaps with channel B
-- **M2**: Fraction of channel B that overlaps with channel A
+- M1: fraction of channel A that overlaps with channel B
+- M2: fraction of channel B that overlaps with channel A
 
 $$M_1 = \frac{\sum A_i \cdot B_{mask,i}}{\sum A_i}$$
 
@@ -82,7 +82,7 @@ m1 = res['results']['total_image']['manders_m1']  # A overlapping B
 m2 = res['results']['total_image']['manders_m2']  # B overlapping A
 ```
 
-### Jaccard Index
+### Jaccard index
 
 Measures overlap of thresholded (binary) regions:
 
@@ -94,7 +94,7 @@ jaccard = res['results']['total_image']['jaccard']
 
 ---
 
-## compute_colocalization() Parameters
+## compute_colocalization() parameters
 
 ```python
 res = cr.compute_colocalization(
@@ -103,30 +103,30 @@ res = cr.compute_colocalization(
     mask=mask_path,               # Segmentation mask (2D or path)
     channel_a="ALIX",             # First channel name or index
     channel_b="LAMP1",            # Second channel name or index
-    
+
     # Channel identification
     channel_names=["DAPI", "ALIX", "Phalloidin", "LAMP1"],
-    
+
     # Thresholding
     thresholding="otsu",          # "none", "otsu", "costes", "fixed"
     fixed_thresholds=(10, 15),    # For thresholding="fixed"
     min_threshold_sigma=3.0,      # Signal floor: threshold >= mean + N*std
-    
+
     # Cell filtering
     min_area="auto",              # Minimum cell area (pixels or "auto")
     min_area_fraction=0.9,        # For "auto": fraction of median area
     max_border_fraction=0.2,      # Remove cells touching border
     border_margin_px=1,           # Border margin in pixels
     drop_label_1=True,            # Remove label 1 (Cellpose background)
-    
+
     # Advanced options
     pearson_winsor_clip=0.1,      # Winsorize outliers for Pearson
     manders_weighting="voxel",    # "voxel" (global) or "slice" (per-z)
-    
+
     # Visualization
     plot_mask=True,               # Generate mask visualization
     plot_mask_save="mask_filtered.png",  # Save path
-    
+
     # Output
     output_json="results.json",   # Save results to JSON
 )
@@ -134,9 +134,9 @@ res = cr.compute_colocalization(
 
 ---
 
-## Thresholding Methods
+## Thresholding methods
 
-### None (Raw Values)
+### None (raw values)
 
 Use raw intensity values without thresholding:
 
@@ -183,13 +183,13 @@ res = cr.compute_colocalization(
 
 ---
 
-## Signal Quality Control
+## Signal quality control
 
-### The Problem with Noise-Only Channels
+### The problem with noise-only channels
 
 Automatic thresholding (Otsu, Costes) assumes both channels have real signal. When a channel contains only noise (e.g., a negative control), these methods set thresholds near the noise floor, causing inflated Manders/Jaccard values.
 
-### Signal Floor (`min_threshold_sigma`)
+### Signal floor (min_threshold_sigma)
 
 The `min_threshold_sigma` parameter ensures thresholds are meaningfully above the noise floor:
 
@@ -212,7 +212,7 @@ res = cr.compute_colocalization(
 | 3.0 | Recommended for most cases |
 | 5.0 | Aggressive - excludes more signal |
 
-### Detecting Floored Thresholds
+### Detecting floored thresholds
 
 Results include information about whether thresholds were raised to the floor:
 
@@ -222,7 +222,7 @@ for z_info in res['results']['total_image']['thresholds_per_z']:
         print(f"Z={z_info['z']}: Channel A threshold raised from {z_info['a_original']:.2f} to {z_info['t_a']:.2f}")
 ```
 
-### Example: Negative Control Analysis
+### Example: negative control analysis
 
 ```python
 # Negative control where ALIX channel has no real signal
@@ -242,9 +242,9 @@ res = cr.compute_colocalization(
 
 ---
 
-## Cell Filtering
+## Cell filtering
 
-### Automatic Area Filtering
+### Automatic area filtering
 
 Remove cells below a fraction of median area:
 
@@ -256,7 +256,7 @@ res = cr.compute_colocalization(
 )
 ```
 
-### Fixed Area Threshold
+### Fixed area threshold
 
 ```python
 res = cr.compute_colocalization(
@@ -265,7 +265,7 @@ res = cr.compute_colocalization(
 )
 ```
 
-### Border Cell Removal
+### Border cell removal
 
 Remove cells touching the image border:
 
@@ -279,7 +279,7 @@ res = cr.compute_colocalization(
 
 ---
 
-## Results Structure
+## Results structure
 
 ```python
 res = cr.compute_colocalization(...)
@@ -319,7 +319,7 @@ filter_info = res['filter_info']
 
 ---
 
-## Working with Results
+## Working with results
 
 ### Convert to DataFrame
 
@@ -338,7 +338,7 @@ print(f"Mean M1: {df_cells['manders_m1'].mean():.3f}")
 df_total = pd.DataFrame([res['results']['total_image']])
 ```
 
-### Visualize Filtered Cells
+### Visualize filtered cells
 
 ```python
 from IPython.display import Image, display
@@ -364,7 +364,7 @@ res = cr.compute_colocalization(
 
 ---
 
-## Complete Example
+## Complete example
 
 ```python
 import colokroll as cr
@@ -433,9 +433,9 @@ df_cells.to_csv("./output/per_cell_colocalization.csv", index=False)
 
 ---
 
-## Interpreting Results
+## Interpreting results
 
-### Pearson Correlation
+### Pearson correlation
 
 | Range | Interpretation |
 |-------|----------------|
@@ -445,7 +445,7 @@ df_cells.to_csv("./output/per_cell_colocalization.csv", index=False)
 | -0.2 - 0.2 | No correlation |
 | < -0.2 | Negative correlation (anti-colocalization) |
 
-### Manders Coefficients
+### Manders coefficients
 
 | M1 / M2 | Interpretation |
 |---------|----------------|
@@ -454,7 +454,7 @@ df_cells.to_csv("./output/per_cell_colocalization.csv", index=False)
 | 0.3 - 0.6 | Partial overlap |
 | < 0.3 | Minimal overlap |
 
-### Common Patterns
+### Common patterns
 
 | Pattern | Pearson | M1 | M2 |
 |---------|---------|----|----|
@@ -465,5 +465,4 @@ df_cells.to_csv("./output/per_cell_colocalization.csv", index=False)
 | No colocalization | ~0 | ~0 | ~0 |
 | Negative control (no signal in A) | ~0 | ~0 | ~0 |
 
-> **Note**: Without `min_threshold_sigma`, negative controls can show artificially inflated Manders values (0.15-0.30) because automatic thresholding sets thresholds near the noise floor. Use `min_threshold_sigma=3.0` to ensure accurate results for negative controls.
-
+Without `min_threshold_sigma`, negative controls can show artificially inflated Manders values (0.15-0.30) because automatic thresholding sets thresholds near the noise floor. Use `min_threshold_sigma=3.0` to ensure accurate results for negative controls.

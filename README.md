@@ -1,12 +1,12 @@
-# 🔬 ColokRoll
+# ColokRoll
 
-**Colocalization analysis toolkit for fluorescence microscopy images**
+**Colocalization analysis for fluorescence microscopy images**
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-ColokRoll is a Python toolkit designed for analyzing colocalization in multi-channel fluorescence microscopy images. It provides a complete pipeline from image loading to cell segmentation, colocalization quantification, and puncta analysis.
+ColokRoll is a Python toolkit for analyzing colocalization in multi-channel fluorescence microscopy images. It handles image loading, cell segmentation, colocalization quantification, and puncta analysis.
 
 ---
 
@@ -14,20 +14,20 @@ ColokRoll is a Python toolkit designed for analyzing colocalization in multi-cha
 
 | Module | Description |
 |--------|-------------|
-| **Image Loading** | Multi-format support (`.nd2`, `.oir`, `.ome.tiff`, TIFF) |
-| **Z-Slice Detection** | Focus-based filtering with multiple strategies |
-| **Background Subtraction** | GPU-accelerated with negative control support |
-| **Cell Segmentation** | Cellpose integration via HuggingFace Spaces |
-| **Colocalization** | Pearson, Manders, Jaccard metrics per-cell |
-| **Puncta Analysis** | LoG and BigFISH detection methods |
+| Image Loading | Multi-format support (`.nd2`, `.oir`, `.ome.tiff`, TIFF) |
+| Z-Slice Detection | Focus-based filtering with multiple strategies |
+| Background Subtraction | GPU-accelerated with negative control support |
+| Cell Segmentation | Cellpose integration via HuggingFace Spaces |
+| Colocalization | Pearson, Manders, Jaccard metrics per-cell |
+| Puncta Analysis | LoG and BigFISH detection methods |
 
 ---
 
-## Workflow Modes
+## Workflow modes
 
 ColokRoll supports two workflow modes for processing microscopy data:
 
-### 🔍 Exploratory Mode (Parameter Calibration)
+### Exploratory mode (parameter calibration)
 
 Use on your first image to visually inspect and select optimal parameters:
 
@@ -51,7 +51,7 @@ corrected, meta = bg_subtractor.subtract_background(
 best_params = meta['parameters_used']
 ```
 
-### 🚀 Batch Mode (Production Processing)
+### Batch mode (production processing)
 
 Apply validated parameters consistently across all images:
 
@@ -67,7 +67,7 @@ corrected, meta = bg_subtractor.subtract_background(
 )
 ```
 
-📖 **See [docs/workflow_modes.md](docs/workflow_modes.md) for detailed guidance.**
+See [docs/workflow_modes.md](docs/workflow_modes.md) for detailed guidance.
 
 ---
 
@@ -85,7 +85,7 @@ pip install -e ".[gpu]"
 
 ---
 
-## Quick Start
+## Quick start
 
 ```python
 import colokroll as cr
@@ -139,16 +139,16 @@ coloc = cr.compute_colocalization(
 
 | Guide | Description |
 |-------|-------------|
-| [Workflow Modes](docs/workflow_modes.md) | Exploratory vs Batch processing |
-| [Z-Slice Detection](docs/z_slice_detection.md) | Focus metrics and strategy comparison |
-| [Background Subtraction](docs/background_subtraction.md) | Methods and negative control support |
-| [Cell Segmentation](docs/cell_segmentation.md) | Cellpose integration |
+| [Workflow modes](docs/workflow_modes.md) | Exploratory vs batch processing |
+| [Z-slice detection](docs/z_slice_detection.md) | Focus metrics and strategy comparison |
+| [Background subtraction](docs/background_subtraction.md) | Methods and negative control support |
+| [Cell segmentation](docs/cell_segmentation.md) | Cellpose integration |
 | [Colocalization](docs/colocalization.md) | Metrics and analysis |
-| [Puncta Analysis](docs/puncta_analysis.md) | Spot detection with BigFISH |
+| [Puncta analysis](docs/puncta_analysis.md) | Spot detection with BigFISH |
 
 ---
 
-## Module Overview
+## Module overview
 
 ```
 colokroll/
@@ -163,7 +163,7 @@ colokroll/
 
 ## Configuration
 
-### GPU Acceleration
+### GPU acceleration
 
 ```bash
 pip install cupy-cuda12x  # For CUDA 12.x

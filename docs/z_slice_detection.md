@@ -1,4 +1,4 @@
-# Z-Slice Detection
+# Z-slice detection
 
 Automatically identify and filter out-of-focus slices from confocal z-stacks using focus quality metrics.
 
@@ -8,13 +8,13 @@ Automatically identify and filter out-of-focus slices from confocal z-stacks usi
 
 Confocal z-stacks often contain slices that are out of focus (above or below the sample). ColokRoll provides tools to:
 
-1. **Compute focus scores** for each z-slice using various metrics
-2. **Compare strategies** to find the best approach for your data
-3. **Filter slices** to keep only in-focus regions
+1. Compute focus scores for each z-slice using various metrics
+2. Compare strategies to find the best approach for your data
+3. Filter slices to keep only in-focus regions
 
 ---
 
-## Quick Start
+## Quick start
 
 ```python
 import colokroll as cr
@@ -38,18 +38,18 @@ print(f"Kept {len(result.indices_keep)} / {image.shape[0]} slices")
 
 ---
 
-## Focus Metrics
+## Focus metrics
 
-### Available Methods
+### Available methods
 
-| Method | Description | Best For |
+| Method | Description | Best for |
 |--------|-------------|----------|
 | `laplacian` | Laplacian variance | General purpose |
 | `tenengrad` | Sobel gradient magnitude | Edge-rich samples |
 | `fft` | High-frequency FFT content | Fine structures |
 | `combined` | Weighted combination of Laplacian + Tenengrad | Most reliable |
 
-### How Metrics Work
+### How metrics work
 
 Each metric computes a score per z-slice per channel:
 
@@ -70,20 +70,20 @@ scores_zc, scores_agg = compute_focus_scores(
 
 ---
 
-## Detection Strategies
+## Detection strategies
 
-### Strategy Comparison
+### Strategy comparison
 
 Different strategies for deciding which slices to keep:
 
-| Strategy | Description | Use When |
+| Strategy | Description | Use when |
 |----------|-------------|----------|
-| `relative` | Keep slices above threshold × peak score | Variable focus quality |
+| `relative` | Keep slices above threshold x peak score | Variable focus quality |
 | `closest` | Keep k slices closest to peak | Fixed number needed |
 | `topk` | Keep top k scoring slices | Fixed number, any position |
 | `auto` | Automatic selection based on score distribution | General purpose |
 
-### Compare All Strategies
+### Compare all strategies
 
 ```python
 # Compare multiple strategies visually
@@ -96,7 +96,7 @@ comparison = cr.compare_strategies(
 
 # View what's available
 print(comparison.strategy_names)
-# ['FFT + Closest (Auto 0.8)', 'FFT + Closest (Auto 0.7)', 
+# ['FFT + Closest (Auto 0.8)', 'FFT + Closest (Auto 0.7)',
 #  'FFT + Closest (k=14)', 'Combined + Closest (Auto)', ...]
 
 # Access results for a specific strategy
@@ -105,7 +105,7 @@ print(f"Kept slices: {result.indices_keep}")
 print(f"Removed slices: {result.indices_remove}")
 ```
 
-### Output Files
+### Output files
 
 When `save_plots=True`, generates:
 
@@ -126,29 +126,29 @@ strategy_comparison/
 result = cr.select_z_slices(
     image,                        # Input: (Z, Y, X, C) array
     axes=None,                    # Optional axis order string
-    
+
     # Focus metric
     method="combined",            # "laplacian", "tenengrad", "fft", "combined"
     aggregation="median",         # How to combine channels: "median", "mean", "max"
-    
+
     # Strategy
     strategy="relative",          # "relative", "closest", "topk", "auto"
     threshold=0.6,                # For "relative": fraction of peak
     keep_top=None,                # For "closest"/"topk": number of slices
     auto_keep_fraction=0.8,       # For "auto": fraction of peak
-    
+
     # Preprocessing
     smooth=3,                     # Smoothing window for scores
     normalize=True,               # Normalize scores per channel
     clip_percent=1.0,             # Percentile clipping
-    
+
     # Quality metrics (optional)
     compute_quality=False,        # Compute Piao et al. metrics
     step_distance=1.0,            # Z-step in micrometers
 )
 ```
 
-### Return Value
+### Return value
 
 ```python
 result = cr.select_z_slices(image, ...)
@@ -165,11 +165,11 @@ result.quality_metrics   # Optional: Piao et al. quality metrics
 
 ---
 
-## Strategy Details
+## Strategy details
 
-### Relative Strategy
+### Relative strategy
 
-Keep all slices with scores above `threshold × peak_score`:
+Keep all slices with scores above `threshold x peak_score`:
 
 ```python
 result = cr.select_z_slices(
@@ -179,7 +179,7 @@ result = cr.select_z_slices(
 )
 ```
 
-### Closest Strategy
+### Closest strategy
 
 Keep the k slices closest to the peak (contiguous region around peak):
 
@@ -198,7 +198,7 @@ result = cr.select_z_slices(
 )
 ```
 
-### TopK Strategy
+### TopK strategy
 
 Keep the top k scoring slices (not necessarily contiguous):
 
@@ -212,7 +212,7 @@ result = cr.select_z_slices(
 
 ---
 
-## Quality Metrics (Piao et al.)
+## Quality metrics (Piao et al.)
 
 Objective metrics for evaluating focus curve quality:
 
@@ -232,7 +232,7 @@ print(f"Cp (peak curvature): {qm.Cp:.2f}")            # Higher = better
 print(f"Is unimodal: {qm.is_unimodal}")
 ```
 
-### Auto-Select Best Method
+### Auto-select best method
 
 Automatically benchmark and select the best focus method:
 
@@ -252,7 +252,7 @@ print(f"Auto-selected method: {result.method}")
 
 ## Examples
 
-### Basic Filtering
+### Basic filtering
 
 ```python
 # Simple relative threshold
@@ -260,14 +260,14 @@ result = cr.select_z_slices(image, threshold=0.6)
 filtered = image[result.indices_keep]
 ```
 
-### Fixed Number of Slices
+### Fixed number of slices
 
 ```python
 # Always keep exactly 14 slices
 result = cr.select_z_slices(image, strategy="closest", keep_top=14)
 ```
 
-### Compare and Choose
+### Compare and choose
 
 ```python
 # Compare strategies, then apply chosen one
@@ -276,7 +276,7 @@ result = comparison.results["FFT + Closest (k=14)"]
 filtered = image[result.indices_keep]
 ```
 
-### Batch Processing
+### Batch processing
 
 ```python
 # Use consistent parameters across all images
@@ -289,4 +289,3 @@ def filter_zslices(image):
     )
     return image[result.indices_keep]
 ```
-

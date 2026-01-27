@@ -1,4 +1,4 @@
-# Puncta Analysis
+# Puncta analysis
 
 Detect and analyze punctate structures (spots/vesicles) in fluorescence microscopy images.
 
@@ -8,14 +8,14 @@ Detect and analyze punctate structures (spots/vesicles) in fluorescence microsco
 
 ColokRoll provides automated puncta detection with:
 
-- **Two detection methods**: Laplacian of Gaussian (LoG) and BigFISH
-- **Per-punctum metrics**: Area, intensity, SNR, nearest neighbor distance
-- **Per-cell aggregation**: Puncta count, density, integrated intensity
-- **Total image statistics**: Overall puncta counts and distributions
+- Two detection methods: Laplacian of Gaussian (LoG) and BigFISH
+- Per-punctum metrics: area, intensity, SNR, nearest neighbor distance
+- Per-cell aggregation: puncta count, density, integrated intensity
+- Total image statistics: overall puncta counts and distributions
 
 ---
 
-## Quick Start
+## Quick start
 
 ```python
 import colokroll as cr
@@ -43,11 +43,11 @@ print(f"Cells analyzed: {puncta['results']['summary']['cells_count']}")
 
 ---
 
-## Detection Methods
+## Detection methods
 
 ### Laplacian of Gaussian (LoG)
 
-Default method using scikit-image. Best for general puncta detection:
+Default method using scikit-image. Works well for general puncta detection:
 
 ```python
 puncta = cr.compute_puncta(
@@ -56,7 +56,7 @@ puncta = cr.compute_puncta(
     channel="LAMP1",
     channel_names=channel_names,
     detection_method="log",
-    
+
     # LoG-specific parameters
     expected_diameter_um=0.4,    # Expected punctum size
     snr_threshold=3.0,           # Signal-to-noise threshold
@@ -75,7 +75,7 @@ puncta = cr.compute_puncta(
     channel="LAMP1",
     channel_names=channel_names,
     detection_method="bigfish",
-    
+
     # BigFISH uses automatic thresholding
     return_threshold_data=True,  # Get elbow curve data
 )
@@ -84,7 +84,7 @@ puncta = cr.compute_puncta(
 threshold_data = puncta.get('threshold_data', {})
 ```
 
-**Installation:**
+Installation:
 
 ```bash
 pip install big-fish
@@ -94,7 +94,7 @@ pip install big-fish
 
 ## Parameters
 
-### compute_puncta() Full Signature
+### compute_puncta() full signature
 
 ```python
 puncta = cr.compute_puncta(
@@ -102,47 +102,47 @@ puncta = cr.compute_puncta(
     image=corrected_stack,        # 4D array, path, or results dict
     mask=mask_path,               # Segmentation mask
     channel="LAMP1",              # Channel name or index
-    
+
     # Channel identification
     channel_names=channel_names,  # Required if using channel names
-    
+
     # Projection (for 3D data)
     projection="mip",             # "mip", "sme", or "none"
-    
+
     # Detection method
     detection_method="log",       # "log" or "bigfish"
-    
+
     # Physical parameters
     pixel_size_um=0.108,          # Pixel size in micrometers
-    expected_diameter_um=0.4,     # Expected punctum diameter (µm)
-    min_diameter_um=0.2,          # Minimum punctum diameter (µm)
-    max_diameter_um=1.0,          # Maximum punctum diameter (µm)
-    
+    expected_diameter_um=0.4,     # Expected punctum diameter (um)
+    min_diameter_um=0.2,          # Minimum punctum diameter (um)
+    max_diameter_um=1.0,          # Maximum punctum diameter (um)
+
     # Detection parameters
     snr_threshold=3.0,            # Signal-to-noise threshold
     min_distance_um=None,         # Min distance between puncta
     min_area_px=4,                # Minimum area in pixels
     max_area_px=None,             # Maximum area (auto from max_diameter)
-    
+
     # Cell filtering
     drop_label_1=True,            # Remove Cellpose background label
-    
+
     # Output
     return_threshold_data=False,  # Include BigFISH threshold data
     output_json="puncta.json",    # Save results to JSON
 )
 ```
 
-### Size Parameters
+### Size parameters
 
-| Parameter | Description | Typical Values |
+| Parameter | Description | Typical values |
 |-----------|-------------|----------------|
-| `expected_diameter_um` | Expected punctum size | 0.3-0.5 µm for vesicles |
-| `min_diameter_um` | Minimum allowed size | 0.2 µm |
-| `max_diameter_um` | Maximum allowed size | 1.0-2.0 µm |
+| `expected_diameter_um` | Expected punctum size | 0.3-0.5 um for vesicles |
+| `min_diameter_um` | Minimum allowed size | 0.2 um |
+| `max_diameter_um` | Maximum allowed size | 1.0-2.0 um |
 | `min_area_px` | Minimum area in pixels | 4-9 pixels |
 
-### Detection Sensitivity
+### Detection sensitivity
 
 | Parameter | Effect |
 |-----------|--------|
@@ -152,7 +152,7 @@ puncta = cr.compute_puncta(
 
 ---
 
-## Results Structure
+## Results structure
 
 ```python
 puncta = cr.compute_puncta(...)
@@ -164,7 +164,7 @@ puncta = {
     "projection": "mip",
     "pixel_size_um": 0.108,
     "detection_params": {...},
-    
+
     "results": {
         # Per-punctum data
         "puncta": [
@@ -183,7 +183,7 @@ puncta = {
             },
             ...
         ],
-        
+
         # Per-cell aggregates
         "per_label": [
             {
@@ -201,7 +201,7 @@ puncta = {
             },
             ...
         ],
-        
+
         # Total image metrics
         "total_image": {
             "total_cell_area_px": 1234567,
@@ -212,7 +212,7 @@ puncta = {
             "total_integrated_intensity": 987654.0,
             "n_cells": 24,
         },
-        
+
         # Summary (mean over cells)
         "summary": {
             "cells_count": 24,
@@ -232,7 +232,7 @@ puncta = {
 
 ---
 
-## Working with Results
+## Working with results
 
 ### Convert to DataFrame
 
@@ -252,7 +252,7 @@ summary = puncta['results']['summary']['mean_over_cells']
 print(f"Mean puncta per cell: {summary['puncta_count']:.1f}")
 ```
 
-### Filter Puncta
+### Filter puncta
 
 ```python
 # Get only bright puncta
@@ -262,7 +262,7 @@ bright_puncta = [p for p in puncta['results']['puncta'] if p['snr'] > 5.0]
 cell_5_puncta = [p for p in puncta['results']['puncta'] if p['cell_label'] == 5]
 ```
 
-### Save Results
+### Save results
 
 ```python
 # Save to JSON
@@ -278,9 +278,9 @@ df_cells.to_csv("puncta_per_cell.csv", index=False)
 
 ---
 
-## Input Formats
+## Input formats
 
-### From Background Subtraction Results
+### From background subtraction results
 
 ```python
 # Use results dict directly
@@ -291,7 +291,7 @@ puncta = cr.compute_puncta(
 )
 ```
 
-### From NumPy Array
+### From NumPy array
 
 ```python
 # 4D array (Z, Y, X, C)
@@ -310,7 +310,7 @@ puncta = cr.compute_puncta(
 )
 ```
 
-### From File Path
+### From file path
 
 ```python
 puncta = cr.compute_puncta(
@@ -322,7 +322,7 @@ puncta = cr.compute_puncta(
 
 ---
 
-## Complete Example
+## Complete example
 
 ```python
 import colokroll as cr
@@ -382,7 +382,7 @@ summary = puncta['results']['summary']
 print(f"Total puncta detected: {total['total_puncta_count']}")
 print(f"Cells analyzed: {summary['cells_count']}")
 print(f"Mean puncta per cell: {summary['mean_over_cells']['puncta_count']:.1f}")
-print(f"Mean density (per µm²): {summary['mean_over_cells']['puncta_density_per_um2']:.4f}")
+print(f"Mean density (per um2): {summary['mean_over_cells']['puncta_density_per_um2']:.4f}")
 
 # Save per-cell results
 df_cells.to_csv("./output/puncta_per_cell.csv", index=False)
@@ -390,21 +390,21 @@ df_cells.to_csv("./output/puncta_per_cell.csv", index=False)
 
 ---
 
-## Tips and Troubleshooting
+## Troubleshooting
 
-### Too Many Puncta Detected
+### Too many puncta detected
 
 - Increase `snr_threshold` (e.g., 4.0 or 5.0)
 - Increase `min_area_px`
 - Check background subtraction quality
 
-### Too Few Puncta Detected
+### Too few puncta detected
 
 - Decrease `snr_threshold` (e.g., 2.0)
 - Check that `expected_diameter_um` matches your puncta size
 - Decrease `min_area_px`
 
-### BigFISH Not Working
+### BigFISH not working
 
 ```bash
 # Install BigFISH
@@ -414,7 +414,7 @@ pip install big-fish
 python -c "from bigfish import detection; print('OK')"
 ```
 
-### Memory Issues with Large Images
+### Memory issues with large images
 
 ```python
 # Use MIP projection to reduce data
@@ -426,7 +426,7 @@ puncta = cr.compute_puncta(
 )
 ```
 
-### Validating Detection
+### Validating detection
 
 ```python
 # Return threshold data for inspection
@@ -440,4 +440,3 @@ puncta = cr.compute_puncta(
 if 'threshold_data' in puncta:
     print(puncta['threshold_data'])
 ```
-

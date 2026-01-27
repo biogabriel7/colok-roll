@@ -1,4 +1,4 @@
-# Background Subtraction
+# Background subtraction
 
 Remove background fluorescence from confocal microscopy images with GPU acceleration and negative control support.
 
@@ -8,14 +8,14 @@ Remove background fluorescence from confocal microscopy images with GPU accelera
 
 Background subtraction removes diffuse background fluorescence to improve signal-to-noise ratio. ColokRoll provides:
 
-- **Multiple methods**: Rolling ball, Gaussian, morphological, two-stage
-- **GPU acceleration**: CUDA (CuPy) and MPS (Apple Silicon) backends
-- **Automatic parameter selection**: Grid search with scoring
-- **Negative control support**: Calibrate parameters using negative control samples
+- Multiple methods: rolling ball, Gaussian, morphological, two-stage
+- GPU acceleration: CUDA (CuPy) and MPS (Apple Silicon) backends
+- Automatic parameter selection: grid search with scoring
+- Negative control support: calibrate parameters using negative control samples
 
 ---
 
-## Quick Start
+## Quick start
 
 ```python
 import colokroll as cr
@@ -34,16 +34,16 @@ corrected, meta = bg_subtractor.subtract_background(
 
 ## Methods
 
-### Available Methods
+### Available methods
 
-| Method | Description | Best For |
+| Method | Description | Best for |
 |--------|-------------|----------|
 | `rolling_ball` | Rolling ball algorithm | Uneven illumination |
 | `gaussian` | 3D Gaussian subtraction | Diffuse haze |
 | `morphological` | Morphological opening | Structured backgrounds |
 | `two_stage` | Gaussian + Rolling ball | Combined benefits |
 
-### Using Specific Methods
+### Using specific methods
 
 ```python
 # Rolling ball
@@ -72,7 +72,7 @@ corrected, meta = bg_subtractor.subtract_background(
 
 ---
 
-## Automatic Parameter Selection
+## Automatic parameter selection
 
 When `method` is not specified (or set to `"auto"`), ColokRoll automatically searches for optimal parameters:
 
@@ -89,11 +89,11 @@ print(f"Parameters: {meta['parameters_used']}")
 print(f"Candidates tested: {meta['auto_candidates_tested']}")
 ```
 
-### Channel-Specific Defaults
+### Channel-specific defaults
 
 The auto-search uses channel-specific parameter grids:
 
-| Channel | Default Method | Typical Parameters |
+| Channel | Default method | Typical parameters |
 |---------|---------------|-------------------|
 | `LAMP1` | two_stage | sigma=14, radius=30 |
 | `Phalloidin` | rolling_ball | radius=50-70 |
@@ -102,19 +102,19 @@ The auto-search uses channel-specific parameter grids:
 
 ---
 
-## Negative Control Support
+## Negative control support
 
 Use negative control samples to calibrate background subtraction parameters.
 
-### What is a Negative Control?
+### What is a negative control?
 
-A negative control is a sample where you know a specific channel should have **no signal** (e.g., ALIX channel in a sample without ALIX staining). This lets you:
+A negative control is a sample where you know a specific channel should have no signal (e.g., ALIX channel in a sample without ALIX staining). This lets you:
 
-1. **Validate** that background subtraction is working correctly
-2. **Calibrate** parameters that minimize residual signal
-3. **Transfer** validated parameters to positive samples
+1. Validate that background subtraction is working correctly
+2. Calibrate parameters that minimize residual signal
+3. Transfer validated parameters to positive samples
 
-### Using Negative Control Mode
+### Using negative control mode
 
 ```python
 # Process a negative control channel
@@ -132,7 +132,7 @@ print(f"Zero fraction: {validation['zero_fraction']:.1%}")
 print(f"95th percentile: {validation['residual_percentile_95']:.2f}")
 ```
 
-### How Negative Control Scoring Works
+### How negative control scoring works
 
 Standard scoring optimizes for:
 - Background reduction
@@ -141,13 +141,13 @@ Standard scoring optimizes for:
 - SSIM similarity
 
 Negative control scoring optimizes for:
-- **Mean reduction**: Lower residual mean intensity
-- **Std reduction**: Lower residual standard deviation
-- **Zero fraction**: More pixels near zero
+- Mean reduction: lower residual mean intensity
+- Std reduction: lower residual standard deviation
+- Zero fraction: more pixels near zero
 
 The algorithm balances these to prevent complete signal flattening while minimizing residual signal.
 
-### Transferring Parameters to Positive Samples
+### Transferring parameters to positive samples
 
 ```python
 # 1. Calibrate on negative control
@@ -183,7 +183,7 @@ corrected_pos, meta_pos = bg_subtractor.subtract_background(
 
 ---
 
-## Processing Multiple Channels
+## Processing multiple channels
 
 ```python
 bg_subtractor = cr.BackgroundSubtractor()
@@ -192,13 +192,13 @@ results = {}
 
 for i, ch in enumerate(channel_names):
     ch_data = image[:, :, :, i]
-    
+
     corrected, meta = bg_subtractor.subtract_background(
         image=ch_data,
         channel_name=ch,
         is_negative_control=(ch == "ALIX"),  # Mark negative controls
     )
-    
+
     results[ch] = (corrected, meta)
 
 # Visualize results
@@ -212,7 +212,7 @@ fig = bg_subtractor.plot_background_subtraction_comparison(
 
 ---
 
-## GPU Acceleration
+## GPU acceleration
 
 ### Backends
 
@@ -234,7 +234,7 @@ pip install cupy-cuda12x  # For CUDA 12.x
 pip install torch kornia
 ```
 
-### Checking Backend
+### Checking backend
 
 ```python
 bg_subtractor = cr.BackgroundSubtractor()
@@ -246,7 +246,7 @@ print(f"Using backend: {bg_subtractor.backend}")
 
 ## Visualization
 
-### Comparison Plot
+### Comparison plot
 
 ```python
 fig = bg_subtractor.plot_background_subtraction_comparison(
@@ -260,9 +260,9 @@ fig.savefig("bg_comparison.png", dpi=200)
 ```
 
 Generates a 3-row plot for each channel:
-1. **Original image** with colorbar
-2. **Corrected image** with method info
-3. **Intensity histogram** comparing original vs corrected
+1. Original image with colorbar
+2. Corrected image with method info
+3. Intensity histogram comparing original vs corrected
 
 ---
 
@@ -284,7 +284,7 @@ config = BackgroundSubtractionConfig(
 bg_subtractor = cr.BackgroundSubtractor(config=config)
 ```
 
-### Auto-Search Weights
+### Auto-search weights
 
 Customize scoring weights for auto-selection:
 
@@ -329,4 +329,3 @@ meta['negative_control_validation'] = {
     'zero_fraction': float,
 }
 ```
-
