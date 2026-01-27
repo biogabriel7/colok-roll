@@ -1,38 +1,51 @@
 name: colok-roll
 channels:
+  - pytorch
+  - nvidia
   - conda-forge
-  - defaults
 
 dependencies:
-  # Python
-  - python>=3.9,<3.14
+  # Python core
+  - python>=3.10,<3.12
   - numpy>=1.20
   - scipy>=1.7
   - pandas>=1.4
+
+  # Image processing
   - scikit-image>=0.19
   - opencv>=4.5
   - pillow>=9.0
   - tifffile>=2023.7
   - imageio>=2.31
   - nd2>=0.10
+
+  # Deep learning (GPU-accelerated)
   - pytorch>=2.0
   - torchvision
-  - tensorflow>=2.8
-  - cupy>=13.0
+  - pytorch-cuda=12.1
+
+  # Visualization
   - matplotlib>=3.5
   - seaborn>=0.11
-  - openpyxl>=3.0
+
+  # Jupyter
   - jupyterlab>=3.0
   - ipykernel>=6.0
+
+  # Utilities
+  - openpyxl>=3.0
+  - pyyaml>=6.0
+  - requests>=2.20
+
+  # Development
   - pytest>=7.0
   - pytest-cov>=3.0
   - black>=22.0
   - flake8>=4.0
-  - pyyaml>=6.0
-  - requests>=2.20
+
   - pip
   - pip:
+      - cellpose>=3.0
       - stardist>=0.8.0
       - opencv-rolling-ball>=1.0.1
       - xlsxwriter>=3.0.0
-      - gradio-client>=1.0.0

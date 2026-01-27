@@ -1,284 +1,269 @@
 # Step-by-Step Guide to Creating a Conda Environment on the Ohio Supercomputer Center (OSC)
 
-This guide assumes you have an active OSC account (request one at [osc.edu](https://www.osc.edu/) if needed). We'll walk through logging into OSC's OnDemand portal, launching a remote desktop session on the Ascend cluster, creating a Conda environment from a repository's environment.yml file, and setting up Jupyter notebooks. All steps use a bash shell.
+This guide assumes you have an active OSC account (request one at [osc.edu](https://www.osc.edu/) if needed). We'll walk through logging into OSC's OnDemand portal, opening a terminal, creating a Conda environment from a repository's environment.yml file, and setting up Jupyter notebooks.
 
 ---
 
 ## Step 1: Log in to OSC OnDemand
 
-- Open the OSC OnDemand portal in a web browser and log in with your OSC credentials.
-    
-- From the top navigation bar, choose **Interactive Apps**.
-    
+- Open the OSC OnDemand portal: [https://ondemand.osc.edu](https://ondemand.osc.edu)
+- Log in with your OSC credentials.
 
 ---
 
-## Step 2: Launch an Ascend Desktop Session
+## Step 2: Open a Terminal
 
-- In the dropdown under Interactive Apps, select **Ascend Desktop**.
-    
+- From the top navigation bar, click **Clusters**.
+- Select **Ascend Shell Access** from the dropdown.
+- A new browser tab will open with a terminal connected to OSC.
 
-### Select Session Parameters
-
-- **Desktop Environment:** Choose **Xfce**
-    
-- **Project/Account:** Select the appropriate project number from the list. This determines where compute time is billed.
-    
-- **Node Type:** Choose **cpu** (default)
-    
-- **Number of Nodes/Cores/GPUs:** For basic environment setup, one node with a small number of cores is sufficient.
-    
-- **Runtime:** Enter the maximum wall time (e.g., 2 hours) your session should last.
-    
-
-### Launch the Session
-
-- Click **Launch** at the bottom of the form.
-    
-- Wait for the session status to change from "Queued" to "Running". This can take a few moments depending on resource availability.
-    
-- When the session is running, click the **Connect** or **Launch Desktop** button. A new window or tab will open with your remote desktop.
-    
+> **Note:** This connects you to a login node, which is appropriate for environment setup tasks. Heavy computational work should use compute nodes via Jupyter or SLURM.
 
 ---
 
-## Step 3: Open a Terminal
+## Step 3: Load the Miniconda Module
 
-- Inside the remote desktop, open a terminal application.
-    
-- You now have shell access on the compute node.
-    
+Load Miniconda to access Conda tools:
 
----
-
-## Step 4: Load the Miniconda Module
-
-- Load Miniconda to access Conda tools:
-    
-    ```bash
-    module load miniconda3/24.1.2-py310
-    conda activate
-    ```
-    
+```bash
+module load miniconda3/24.1.2-py310
+conda activate
+```
 
 ---
 
-## Step 5: Configure Conda (First-Time Setup Only)
+## Step 4: Configure Conda (First-Time Setup Only)
 
-- Optimize Conda channels for compatibility:
-    
-    ```bash
-    conda config --remove channels defaults
-    conda config --add channels conda-forge
-    conda config --set channel_priority strict
-    ```
-    
-- If dependency issues occur, try:
-    
-    ```bash
-    conda config --set channel_priority flexible
-    ```
-    
+Optimize Conda channels for compatibility:
+
+```bash
+conda config --remove channels defaults
+conda config --add channels conda-forge
+conda config --set channel_priority strict
+```
+
+If dependency issues occur later, try:
+
+```bash
+conda config --set channel_priority flexible
+```
 
 ---
 
-## Step 6: Clone a Repository and Create the Conda Environment
+## Step 5: Clone the Repository and Create the Conda Environment
 
 ### Clone the Repository
 
-- Clone the repository.
-    
-    ```bash
-    git clone https://github.com/biogabriel7/colok-roll.git
-    ```
-    
+```bash
+git clone https://github.com/biogabriel7/colok-roll.git
+```
 
 ### Navigate to the Repository Directory
 
-- Change to the repository directory:
-    
-    ```bash
-    cd colok-roll
-    ```
-    
+```bash
+cd colok-roll
+```
 
-### Verify the Environment File
+### Verify the Environment File Exists
 
-- Verify the environment.yml exists:
-    
-    ```bash
-    ls environment.yml
-    ```
-    
-- It should define the environment name and dependencies, e.g.:
-    
-    ```yaml
-    name: colok-roll
-    channels:
-      - conda-forge
-    dependencies:
-      - python=3.10
-      - numpy=1.24
-      - pandas
-    ```
-    
+```bash
+ls environment.yml
+```
 
 ### Create the Environment
 
-- Create the environment from the environment.yml file:
-    
-    ```bash
-    conda env create -f environment.yml
-    ```
-    
-- This creates an environment named `colok-roll`.
-    
+This step takes several minutes. The command reads `environment.yml` and installs all required packages:
+
+```bash
+conda env create -f environment.yml
+```
 
 ### Confirm Creation
 
-- Confirm creation by listing all environments:
-    
-    ```bash
-    conda info --envs
-    ```
-    
-- The `colok-roll` environment should appear in the list.
-    
+List all environments to verify:
+
+```bash
+conda info --envs
+```
+
+You should see `colok-roll` in the list.
 
 ---
 
-## Step 7: Activate and Test the Environment
+## Step 6: Activate and Test the Environment
 
 ### Activate the Environment
 
-- Activate the environment:
-    
-    ```bash
-    conda activate colok-roll
-    ```
-    
+```bash
+conda activate colok-roll
+```
 
 ### Test the Installation
 
-- Test that packages are correctly installed:
-    
-    ```bash
-    python -c "import numpy; print(numpy.__version__)"
-    ```
-    
-- Adjust the test command for your specific packages. The path should point to your environment.
-    
+Verify that key packages are installed and GPU is available:
+
+```bash
+python -c "import torch; print('PyTorch:', torch.__version__); print('CUDA available:', torch.cuda.is_available())"
+python -c "import cellpose; print('Cellpose: OK')"
+```
+
+> **Expected output:** `CUDA available: True`. If it shows `False`, the GPU packages may not have installed correctly.
 
 ---
 
-## Step 8: Set Up Jupyter with the Conda Environment
+## Step 7: Set Up Jupyter with the Conda Environment
 
-### Install Jupyter in Your Environment
+### Install ipykernel
 
-- Ensure Jupyter is installed in your environment:
-    
-    ```bash
-    conda install jupyter
-    ```
-    
+With the `colok-roll` environment still active:
+
+```bash
+conda install -y ipykernel
+```
 
 ### Register the Environment as a Jupyter Kernel
 
-- Install ipykernel:
-    
-    ```bash
-    conda install ipykernel
-    ```
-    
-- Register the environment as a Jupyter kernel:
-    
-    ```bash
-    python -m ipykernel install --user --name colokroll --display-name "ColokRoll"
-    ```
-    
-- This makes `colokroll` available as a kernel in Jupyter (visible as "ColokRoll").
-    
+```bash
+python -m ipykernel install --user --name colok-roll --display-name "ColokRoll"
+```
 
-### Access Jupyter via OSC's OnDemand Portal
-
-- Log in to OnDemand.
-    
-- Navigate to **Interactive Apps > Jupyter Notebook**.
-    
-- Select your cluster (**Ascend**), set resources (e.g., 1 node, 1 core, 1 hour), and select **Cuda 13.3**.
-    
-    
-- Launch the session. In the Jupyter interface, select "ColokRoll" from the kernel dropdown to use your environment.
-    
-
-### Important Note
-
-- Run Jupyter jobs via OnDemand or SLURM to avoid overloading login nodes.
-    
+This makes `colok-roll` available as a kernel in Jupyter (displayed as "ColokRoll").
 
 ---
 
-## Step 9: Additional Tips and Troubleshooting
+## Step 8: Launch Jupyter via OnDemand
 
-### Manage the Environment
+1. Return to the OnDemand portal: [https://ondemand.osc.edu](https://ondemand.osc.edu)
+2. Click **Interactive Apps** in the top navigation bar.
+3. Select **Jupyter Notebook**.
 
-- **Deactivate the environment:**
-    
-    ```bash
-    conda deactivate
-    ```
-    
-- **List packages in the environment:**
-    
-    ```bash
-    conda list -n colokroll
-    ```
-    
-- **Remove the environment:**
-    
-    ```bash
-    conda remove -n colokroll --all
-    ```
-    
-- **Update all packages:** Activate the environment first, then run:
-    
-    ```bash
-    conda update --all
-    ```
-    
+### Configure the Jupyter Session
 
-### Avoid .bashrc Conflicts
+| Setting | Value |
+|---------|-------|
+| Cluster | **Ascend** |
+| Project | Your project code |
+| Number of cores | 4 |
+| Amount of memory (GB) | 16 |
+| Number of GPUs | **1** (required for Cellpose) |
+| Wall time (hours) | 2 |
 
-- Comment out Conda initialization lines in `~/.bashrc` (between `# >>> conda initialize >>>` and `# <<< conda initialize <<<`) for cleaner sessions.
-    
+4. Click **Launch**.
+5. Wait for the session to start (status changes from "Queued" to "Running").
+6. Click **Connect to Jupyter**.
 
-### Storage Considerations
+### Select the ColokRoll Kernel
 
-- Use `$HOME` (~10-50GB quota) for personal environments.
-    
-- Use project spaces (e.g., `/fs/ess/P00000000/`) for team environments with larger storage needs.
-    
-
-### Troubleshooting
-
-- **Module conflicts:** Run `module purge` to clear all loaded modules before loading Miniconda.
-    
-- **Check Conda information:**
-    
-    ```bash
-    conda info
-    ```
-    
-- **Get help:** Email support@osc.edu or use OnDemand's web terminal for assistance.
-    
-
-### Running Compute Jobs
-
-- Use `srun` or `sbatch` for computational tasks.
-    
-- Avoid running heavy workloads on login nodes.
-    
+- When creating a new notebook or opening an existing one, select **ColokRoll** from the kernel dropdown.
 
 ---
 
-**Summary:** You now have a functional Conda environment on OSC, accessible through both the command line and Jupyter notebooks. This setup allows you to manage dependencies efficiently and run your code in an isolated, reproducible environment.
+## Step 9: Verify Everything Works
+
+In Jupyter, create a new notebook with the ColokRoll kernel and run:
+
+```python
+import torch
+import numpy as np
+import cellpose
+from cellpose import models
+
+print("=== Environment Check ===")
+print(f"NumPy: {np.__version__}")
+print(f"PyTorch: {torch.__version__}")
+print(f"CUDA available: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"GPU: {torch.cuda.get_device_name(0)}")
+print("Cellpose: OK")
+print("=== Setup complete! ===")
+```
+
+**Expected output:** `CUDA available: True` and a GPU name (e.g., `NVIDIA A100`). If CUDA shows `False`, check that you requested at least 1 GPU when launching the Jupyter session.
+
+---
+
+## Troubleshooting
+
+### "conda: command not found"
+
+Reload the module:
+
+```bash
+module load miniconda3/24.1.2-py310
+conda activate
+```
+
+### Environment creation fails with dependency conflicts
+
+Try flexible channel priority:
+
+```bash
+conda config --set channel_priority flexible
+conda env create -f environment.yml
+```
+
+### Kernel not showing in Jupyter
+
+Re-register the kernel:
+
+```bash
+conda activate colok-roll
+python -m ipykernel install --user --name colok-roll --display-name "ColokRoll"
+```
+
+Then refresh the Jupyter page.
+
+### Module conflicts
+
+Clear all modules before loading Miniconda:
+
+```bash
+module purge
+module load miniconda3/24.1.2-py310
+```
+
+### Need help?
+
+- Email: support@osc.edu
+- OSC documentation: [https://www.osc.edu/resources/technical_support](https://www.osc.edu/resources/technical_support)
+
+---
+
+## Quick Reference: Daily Use
+
+After initial setup, your daily workflow is:
+
+1. Go to [ondemand.osc.edu](https://ondemand.osc.edu)
+2. **Interactive Apps → Jupyter Notebook**
+3. Configure resources, click **Launch**
+4. Select **ColokRoll** kernel
+5. Run your analysis
+
+---
+
+## Managing Your Environment
+
+**Deactivate:**
+```bash
+conda deactivate
+```
+
+**List installed packages:**
+```bash
+conda list -n colok-roll
+```
+
+**Update all packages:**
+```bash
+conda activate colok-roll
+conda update --all
+```
+
+**Remove the environment (if needed):**
+```bash
+conda remove -n colok-roll --all
+```
+
+---
+
+**Summary:** You now have a functional Conda environment on OSC, accessible through Jupyter notebooks. This setup allows you to manage dependencies efficiently and run your code in an isolated, reproducible environment.
