@@ -966,7 +966,7 @@ def _compute_manders_per_z(
             channel_a_for_threshold, channel_b_for_threshold = channel_a_norm_z, channel_b_norm_z
         
         # Determine thresholds for this Z-slice
-        threshold_a_at_z, threshold_b_at_z = _compute_thresholds(
+        threshold_a_at_z, threshold_b_at_z, _ = _compute_thresholds(
             channel_a_for_threshold, channel_b_for_threshold, thresholding, fixed_thresholds
         )
         
