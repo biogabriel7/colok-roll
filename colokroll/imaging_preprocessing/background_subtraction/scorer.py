@@ -89,8 +89,8 @@ class BackgroundScorer:
         fg = slice_np >= thr
         fg = morphology.remove_small_objects(fg, min_size=FG_MIN_PIXELS)
         if FG_DILATE_RADIUS > 0:
-            fg = morphology.binary_dilation(fg, morphology.disk(FG_DILATE_RADIUS))
-        fg = morphology.binary_closing(fg, morphology.disk(1))
+            fg = morphology.dilation(fg, morphology.disk(FG_DILATE_RADIUS))
+        fg = morphology.closing(fg, morphology.disk(1))
         bg = ~fg
         return fg, bg
     
