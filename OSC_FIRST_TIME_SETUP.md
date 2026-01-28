@@ -78,6 +78,17 @@ This step takes several minutes. The command reads `environment.yml` and install
 conda env create -f environment.yml
 ```
 
+### Install the colok-roll Package
+
+After creating the environment, activate it and install the package in editable mode:
+
+```bash
+conda activate colok-roll
+pip install -e .
+```
+
+This installs `colok-roll` from `pyproject.toml`, allowing you to import it as a module and edit the source code without reinstalling.
+
 ### Confirm Creation
 
 List all environments to verify:
